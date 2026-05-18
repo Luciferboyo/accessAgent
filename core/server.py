@@ -170,6 +170,7 @@ class AccessAgentServer:
         usage = UsageSummary()
         final_result = None
         success = False
+        report_rejected_count = 0  # report 被校验拒绝的次数，超限后强制放行
 
         # 任务开始时分类一次，后续复用，不重复调用 LLM
         is_info_task = await self._classify_task(task)
@@ -276,14 +277,36 @@ class AccessAgentServer:
 
                 if action.get("action") == "report":
                     content = action.get("params", {}).get("content", "")
-                    # 校验 report 内容是否真正回答了任务
-                    valid, missing = await self._validate_report(task, content)
+
+                    # report 被拒次数超过阈值：强制放行，接受最优努力结果
+                    MAX_REPORT_REJECTIONS = 3
+                    if report_rejected_count >= MAX_REPORT_REJECTIONS:
+                        print(f"[放行] report 已被拒绝 {report_rejected_count} 次，强制接受当前内容")
+                        valid, missing = True, ""
+                    else:
+                        # 校验 report 内容是否真正回答了任务
+                        valid, missing = await self._validate_report(task, content)
+
                     if not valid:
-                        print(f"[拦截] report 内容不符合任务要求：{missing}")
-                        failure_reason = f"report 的内容不完整或不相关：{missing}。请继续操作，获取真正需要的数据后再 report"
+                        report_rejected_count += 1
+                        remaining = MAX_REPORT_REJECTIONS - report_rejected_count
+                        print(f"[拦截] report 内容不符合任务要求（第 {report_rejected_count} 次拒绝）：{missing}")
+                        if remaining > 0:
+                            failure_reason = (
+                                f"report 的内容不完整或不相关：{missing}。"
+                                f"请继续操作，获取更完整的数据后再 report。"
+                                f"（还有 {remaining} 次机会，之后将强制接受）"
+                            )
+                        else:
+                            failure_reason = (
+                                f"report 内容多次被拒绝（{missing}）。"
+                                f"这是最后一次机会：请将目前找到的所有信息汇总，"
+                                f"并明确说明哪些信息无法获取及原因，然后用 report 汇报。"
+                            )
                         consecutive_failures += 1
                         current_state = await self._request_state(websocket)
                         continue
+
                     self._save_report(task, content)
                     await websocket.send(json.dumps({"type": "finish", "message": "信息收集完成"}))
                     self.memory.save_flow(task, plan, action_log)
