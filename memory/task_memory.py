@@ -9,7 +9,9 @@ MEMORY_FILE = "./memory/task_flows.json"
 class TaskMemory:
     """
     记录成功完成的任务流程。
-    下次遇到完全相同或高度相似的任务直接复用，减少 AI 调用。
+    分两种质量等级：
+    - full：完全成功，下次直接复用计划
+    - partial：部分成功（如强制放行），下次仅作为经验提示传给 Planner，不复用计划
     """
 
     def __init__(self):
@@ -33,18 +35,15 @@ class TaskMemory:
         - 英文：按空格分词，长度 >= 2
         """
         keywords = []
-        # 英文词
         for word in task.split():
             if len(word) >= 2:
                 keywords.append(word.lower())
-        # 中文2字词组（滑动窗口）
         chinese_chars = ""
         for ch in task:
-            if '一' <= ch <= '鿿':
+            if '一' <= ch <= '鿿' or '㐀' <= ch <= '䶿':
                 chinese_chars += ch
             else:
                 if len(chinese_chars) >= 2:
-                    # 提取所有长度>=2的子串
                     for l in range(2, min(5, len(chinese_chars) + 1)):
                         for i in range(len(chinese_chars) - l + 1):
                             keywords.append(chinese_chars[i:i+l])
@@ -56,49 +55,72 @@ class TaskMemory:
         return list(set(keywords))
 
     def _similarity(self, task: str, stored_task: str) -> float:
-        """
-        计算两个任务的相似度（0~1）。
-        用关键词交集占比衡量，需要超过阈值才认为是相似任务。
-        """
+        """Jaccard 相似度（关键词交集/并集）"""
         kw1 = set(self._extract_keywords(task))
         kw2 = set(self._extract_keywords(stored_task))
         if not kw1 or not kw2:
             return 0.0
-        intersection = kw1 & kw2
-        # Jaccard 相似度
-        union = kw1 | kw2
-        return len(intersection) / len(union)
+        return len(kw1 & kw2) / len(kw1 | kw2)
 
-    def find_similar(self, task: str, threshold: float = 0.85) -> list[str] | None:
+    def find_similar(self, task: str, threshold: float = 0.85) -> dict | None:
         """
-        查找相似任务的历史步骤。
-        相似度需超过 threshold（默认 0.85）才复用。
+        查找相似任务的历史记录。
+
+        返回值：
+        - None：未找到相似任务
+        - {"quality": "full",    "steps": [...]}        完全成功，直接复用计划
+        - {"quality": "partial", "hint":  {...}}        部分成功，作为经验提示
         """
         best_score = 0.0
-        best_steps = None
+        best_data = None
         best_key = None
 
         for key, data in self.flows.items():
             score = self._similarity(task, data.get("task", key))
             if score > best_score:
                 best_score = score
-                best_steps = data["steps"]
+                best_data = data
                 best_key = key
 
-        if best_score >= threshold:
-            print(f"[Memory] 找到相似任务（相似度 {best_score:.0%}）：{best_key}")
-            return best_steps
+        if best_score < threshold or best_data is None:
+            print(f"[Memory] 未找到相似任务（最高相似度 {best_score:.0%}），重新规划")
+            return None
 
-        print(f"[Memory] 未找到相似任务（最高相似度 {best_score:.0%}），重新规划")
-        return None
+        quality = best_data.get("quality", "full")
+        label = "完全成功" if quality == "full" else "部分成功"
+        print(f"[Memory] 找到相似任务（相似度 {best_score:.0%}，{label}）：{best_key}")
 
-    def save_flow(self, task: str, steps: list[str], actions: list[dict]):
+        if quality == "full":
+            steps = best_data.get("steps", [])
+            return {"quality": "full", "steps": steps} if steps else None
+
+        # partial：返回经验提示，不复用计划
+        return {"quality": "partial", "hint": best_data.get("hint", {})}
+
+    def save_flow(self, task: str, steps: list[str], actions: list[dict],
+                  quality: str = "full", hint: dict = None):
+        """
+        保存任务流程。
+
+        quality:
+          "full"    完全成功，下次直接复用 steps
+          "partial" 部分成功（强制放行），只保存 hint，不复用 steps
+        hint:
+          partial 时必须传入，包含 failed_paths / found_info / suggestion
+        """
         key = task[:40]
-        self.flows[key] = {
+        record = {
             "task": task,
-            "steps": steps,
-            "actions": actions,
+            "quality": quality,
             "saved_at": datetime.now().isoformat(),
         }
+        if quality == "full":
+            record["steps"] = steps
+            record["actions"] = actions
+        else:
+            record["hint"] = hint or {}
+
+        self.flows[key] = record
         self._save()
-        print(f"[Memory] 已保存任务流程：{key}")
+        label = "完全成功" if quality == "full" else "部分成功（经验提示）"
+        print(f"[Memory] 已保存任务流程（{label}）：{key}")

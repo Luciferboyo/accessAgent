@@ -38,9 +38,24 @@ class Planner:
     def __init__(self, llm: TextLLM):
         self.llm = llm
 
-    def make_plan(self, task: str, ui_text: str) -> tuple[list[str], TokenUsage]:
-        prompt = f"""任务：{task}
+    def make_plan(self, task: str, ui_text: str,
+                  hint: dict = None) -> tuple[list[str], TokenUsage]:
+        # 有上次部分成功的经验时，拼入 prompt 让 Planner 避免重复走弯路
+        hint_text = ""
+        if hint:
+            parts = []
+            if hint.get("failed_paths"):
+                paths_str = "、".join(hint["failed_paths"][:3])
+                parts.append(f"- 上次已尝试但无效的路径：{paths_str}")
+            if hint.get("found_info"):
+                parts.append(f"- 上次找到的部分信息：{hint['found_info'][:200]}")
+            if hint.get("suggestion"):
+                parts.append(f"- 建议：{hint['suggestion']}")
+            if parts:
+                hint_text = "\n【上次经验参考（请避免重复相同弯路，尝试新路径）】\n" + "\n".join(parts) + "\n"
 
+        prompt = f"""任务：{task}
+{hint_text}
 当前界面元素：
 {ui_text}
 

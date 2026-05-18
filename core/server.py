@@ -169,8 +169,21 @@ class AccessAgentServer:
 
         await websocket.send(json.dumps({"type": "task", "task": task}))
 
-        # find_similar 返回 None 或 steps 列表；空列表视同未找到，强制重新规划
-        plan = self.memory.find_similar(task) or None
+        # 从记忆中查找相似任务
+        # full  → 直接复用计划，planner_hint = None
+        # partial → 不复用计划，将 hint 传给 Planner 避免重复弯路
+        memory_result = self.memory.find_similar(task)
+        if memory_result is None:
+            plan = None
+            planner_hint = None
+        elif memory_result["quality"] == "full":
+            plan = memory_result["steps"] or None   # 空列表视同未找到
+            planner_hint = None
+        else:                                        # partial
+            plan = None
+            planner_hint = memory_result.get("hint")
+            print("[Memory] 上次部分成功，经验将作为规划参考")
+
         step_index = 0
         history = []
         action_log = []
@@ -183,6 +196,7 @@ class AccessAgentServer:
         success = False
         report_rejected_count = 0  # report 被校验拒绝的次数，超限后强制放行
         verify_failed_count = 0    # verify 任务 finish 未通过次数，超限后强制放行
+        force_accepted = False     # 是否为强制放行（用于记忆质量判断）
 
         # 任务开始时分类一次，后续复用，不重复调用 LLM
         # task_type: "info" | "operation" | "verify"
@@ -204,7 +218,7 @@ class AccessAgentServer:
                 if plan is None:
                     print("[Planner] 生成任务计划...")
                     plan, plan_usage = await self._in_thread(
-                        self.planner.make_plan, task, ui_text
+                        self.planner.make_plan, task, ui_text, planner_hint
                     )
                     usage.add_text(plan_usage)
                     # 生成失败时保底：把整个任务作为一个步骤
@@ -224,7 +238,7 @@ class AccessAgentServer:
                         continue
                     print("[完成] 所有步骤执行完毕")
                     await websocket.send(json.dumps({"type": "finish", "message": "任务完成"}))
-                    self.memory.save_flow(task, plan, action_log)
+                    self.memory.save_flow(task, plan, action_log, quality="full")
                     success = True
                     break
 
@@ -297,6 +311,7 @@ class AccessAgentServer:
                         if verify_failed_count >= MAX_VERIFY_FAILURES:
                             print(f"[放行] 操作验证已失败 {verify_failed_count} 次，强制接受 finish")
                             verified, verify_reason = True, "多次验证后强制放行"
+                            force_accepted = True
                         else:
                             print("[验证] 检查操作是否成功...")
                             verified, verify_reason = await self._verify_operation(task, ui_text)
@@ -322,7 +337,11 @@ class AccessAgentServer:
                         print(f"[验证] 操作已确认成功：{verify_reason}")
 
                     await websocket.send(json.dumps({"type": "finish", "message": "任务完成"}))
-                    self.memory.save_flow(task, plan, action_log)
+                    if force_accepted:
+                        hint = self._build_partial_hint(action_log, None)
+                        self.memory.save_flow(task, plan, action_log, quality="partial", hint=hint)
+                    else:
+                        self.memory.save_flow(task, plan, action_log, quality="full")
                     success = True
                     print("[完成] 任务成功结束")
                     break
@@ -335,6 +354,7 @@ class AccessAgentServer:
                     if report_rejected_count >= MAX_REPORT_REJECTIONS:
                         print(f"[放行] report 已被拒绝 {report_rejected_count} 次，强制接受当前内容")
                         valid, missing = True, ""
+                        force_accepted = True
                     else:
                         # 校验 report 内容是否真正回答了任务
                         valid, missing = await self._validate_report(task, content)
@@ -361,7 +381,11 @@ class AccessAgentServer:
 
                     self._save_report(task, content)
                     await websocket.send(json.dumps({"type": "finish", "message": "信息收集完成"}))
-                    self.memory.save_flow(task, plan, action_log)
+                    if force_accepted:
+                        hint = self._build_partial_hint(action_log, content)
+                        self.memory.save_flow(task, plan, action_log, quality="partial", hint=hint)
+                    else:
+                        self.memory.save_flow(task, plan, action_log, quality="full")
                     final_result = content
                     success = True
                     print("[完成] 信息收集完成")
@@ -574,6 +598,46 @@ Agent 准备汇报的内容：
         except Exception as e:
             print(f"[验证] 解析失败（{e}），默认放行")
             return True, ""
+
+    def _build_partial_hint(self, action_log: list[dict], final_result: str | None) -> dict:
+        """
+        从部分成功的执行过程中提取经验，供下次任务规划参考。
+        - failed_paths: 尝试过但无效的搜索/操作
+        - found_info:   本次找到的部分内容
+        - suggestion:   给 Planner 的建议
+        """
+        failed_paths = []
+        for action in action_log:
+            act = action.get("action", "")
+            params = action.get("params", {})
+            reason = action.get("reason", "")
+            if act == "search_web":
+                q = params.get("query", "")
+                if q:
+                    failed_paths.append(f"搜索：{q}")
+            elif act == "click" and reason:
+                # reason 里通常包含点击目标的描述
+                failed_paths.append(f"点击：{reason[:40]}")
+
+        # 去重 + 截取前 4 条
+        seen = set()
+        unique_paths = []
+        for p in failed_paths:
+            if p not in seen:
+                seen.add(p)
+                unique_paths.append(p)
+            if len(unique_paths) >= 4:
+                break
+
+        return {
+            "failed_paths": unique_paths,
+            "found_info": (final_result or "")[:300] if final_result else "未找到有效信息",
+            "suggestion": (
+                "上次通过搜索引擎获取的主要是新闻文章，未找到结构化数据。"
+                "建议直接访问专业数据网站（如 NBA 官网、ESPN、basketball-reference 等），"
+                "或使用更精确的搜索关键词（加上 'box score'、'stats' 等英文词）。"
+            ),
+        }
 
     def _save_report(self, task: str, content: str):
         import datetime as dt
