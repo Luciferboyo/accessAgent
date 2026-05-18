@@ -689,35 +689,44 @@ Agent 准备汇报的内容：
     def _build_command(self, action: dict, ui_elements: list[dict]) -> dict | None:
         """
         构建发给手机的指令。
-        若 index 越界返回 None，由调用方标记失败并重试。
+        若 index 越界或元素 bounds 无效（不可见），返回 None，由调用方标记失败并重试。
         """
         act = action.get("action")
         params = action.get("params", {})
 
-        if act in ("click", "long_click"):
-            idx = params.get("index", 1) - 1
-            if 0 <= idx < len(ui_elements):
-                x, y = self.analyzer.get_center(ui_elements[idx])
-                return {"type": act, "x": x, "y": y}
-            print(f"[警告] {act} 元素 index={idx+1} 越界（共 {len(ui_elements)} 个）")
+        def get_valid_elem(target_idx: int, act_name: str) -> dict | None:
+            """按 index 字段查找元素，并验证 bounds 有效。"""
+            for e in ui_elements:
+                if e.get("index") == target_idx:
+                    if self.analyzer._valid_bounds(e):
+                        return e
+                    b = e.get("bounds", [])
+                    print(f"[警告] {act_name} 元素 index={target_idx} bounds 无效 {b}，跳过（不可见元素）")
+                    return None
+            print(f"[警告] {act_name} 元素 index={target_idx} 不存在（共 {len(ui_elements)} 个）")
             return None
+
+        if act in ("click", "long_click"):
+            elem = get_valid_elem(params.get("index", 1), act)
+            if elem is None:
+                return None
+            x, y = self.analyzer.get_center(elem)
+            return {"type": act, "x": x, "y": y}
 
         if act == "type":
-            idx = params.get("index", 1) - 1
-            if 0 <= idx < len(ui_elements):
-                x, y = self.analyzer.get_center(ui_elements[idx])
-                return {"type": "type", "x": x, "y": y, "text": params.get("text", "")}
-            print(f"[警告] type 元素 index={idx+1} 越界（共 {len(ui_elements)} 个）")
-            return None
+            elem = get_valid_elem(params.get("index", 1), "type")
+            if elem is None:
+                return None
+            x, y = self.analyzer.get_center(elem)
+            return {"type": "type", "x": x, "y": y, "text": params.get("text", "")}
 
         if act == "scroll":
-            idx = params.get("index", 1) - 1
-            if 0 <= idx < len(ui_elements):
-                x, y = self.analyzer.get_center(ui_elements[idx])
-                return {"type": "scroll", "x": x, "y": y,
-                        "direction": params.get("direction", "up")}
-            print(f"[警告] scroll 元素 index={idx+1} 越界（共 {len(ui_elements)} 个）")
-            return None
+            elem = get_valid_elem(params.get("index", 1), "scroll")
+            if elem is None:
+                return None
+            x, y = self.analyzer.get_center(elem)
+            return {"type": "scroll", "x": x, "y": y,
+                    "direction": params.get("direction", "up")}
 
         if act == "open_app":
             return {"type": "open_app", "package": params.get("package", "")}

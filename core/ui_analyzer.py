@@ -9,10 +9,23 @@ class UIAnalyzer:
 
     NEEDS_VISION_KEYWORDS = ["验证码", "captcha", "图片", "图形", "选择图中"]
 
+    @staticmethod
+    def _valid_bounds(elem: dict) -> bool:
+        """判断元素边界是否有效（宽和高均 >= 2 像素）"""
+        b = elem.get("bounds", [0, 0, 0, 0])
+        return abs(b[2] - b[0]) >= 2 and abs(b[3] - b[1]) >= 2
+
     def parse_elements(self, ui_elements: list[dict]) -> str:
-        """将元素列表转成文字描述，发给文本 LLM"""
+        """
+        将元素列表转成文字描述，发给文本 LLM。
+        自动跳过 bounds 无效的不可见元素（与 ScreenAnnotator 保持一致），
+        避免 LLM 选取无法点击的零尺寸元素导致死循环。
+        """
         lines = []
         for elem in ui_elements:
+            if not self._valid_bounds(elem):
+                continue  # 跳过不可见元素，与标注器保持一致
+
             parts = [f"[{elem['index']}]", elem["class"]]
             if elem.get("text"):
                 parts.append(f'text="{elem["text"]}"')
