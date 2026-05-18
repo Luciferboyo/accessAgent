@@ -347,6 +347,17 @@ class AccessAgentServer:
                     break
 
                 if action.get("action") == "report":
+                    # 纯操作任务不应以 report 结束，引导改为 finish
+                    if task_type == "operation":
+                        print("[拦截] 纯操作任务不应使用 report，引导改用 finish")
+                        failure_reason = (
+                            "这是一个纯操作任务，目标是完成操作而非收集信息。"
+                            "请不要使用 report，确认操作已完成后直接调用 finish。"
+                        )
+                        consecutive_failures += 1
+                        current_state = await self._request_state(websocket)
+                        continue
+
                     content = action.get("params", {}).get("content", "")
 
                     # report 被拒次数超过阈值：强制放行，接受最优努力结果
