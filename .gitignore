@@ -12,7 +12,8 @@ env/
 
 # 环境变量（含 API Key，绝对不能上传）
 .env
-.env.*
+.env.local
+# .env.example 允许上传（不含真实 Key）
 
 # 截图和报告（运行时生成）
 screenshots/
