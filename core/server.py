@@ -644,14 +644,22 @@ Agent 准备汇报的内容：
             if len(unique_paths) >= 4:
                 break
 
+        # 根据失败路径推断通用建议
+        if any("搜索" in p for p in unique_paths):
+            suggestion = (
+                "上次通过搜索引擎未找到完整结构化数据。"
+                "建议尝试更精确的搜索关键词（加上具体日期、英文关键词或'统计'、'数据'等），"
+                "或直接访问专业垂直网站（官网、权威数据平台等）。"
+            )
+        else:
+            suggestion = (
+                "上次执行路径遇到阻碍，建议尝试不同的操作路径或更换目标元素。"
+            )
+
         return {
             "failed_paths": unique_paths,
             "found_info": (final_result or "")[:300] if final_result else "未找到有效信息",
-            "suggestion": (
-                "上次通过搜索引擎获取的主要是新闻文章，未找到结构化数据。"
-                "建议直接访问专业数据网站（如 NBA 官网、ESPN、basketball-reference 等），"
-                "或使用更精确的搜索关键词（加上 'box score'、'stats' 等英文词）。"
-            ),
+            "suggestion": suggestion,
         }
 
     def _save_report(self, task: str, content: str):
