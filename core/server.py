@@ -248,7 +248,7 @@ class AccessAgentServer:
                 # ── 3. 优先文本决策 ──────────────────────────────
                 print("[Text] 尝试文本决策...")
                 action, text_usage = await self._in_thread(
-                    self.executor.decide_text, current_step, ui_text, history, failure_reason
+                    self.executor.decide_text, current_step, step_index, len(plan), ui_text, history, failure_reason
                 )
                 usage.add_text(text_usage)
                 print(f"[Text] {action.get('action')} | {action.get('reason')}")
@@ -290,7 +290,7 @@ class AccessAgentServer:
                     print(f"[Vision] 标注截图：{annotated}")
                     action, vision_usage = await self._in_thread(
                         self.executor.decide_vision,
-                        current_step, annotated, ui_text, history, failure_reason
+                        current_step, step_index, len(plan), annotated, ui_text, history, failure_reason
                     )
                     usage.add_vision(vision_usage)
                     print(f"[Vision] {action.get('action')} | {action.get('reason')}")
