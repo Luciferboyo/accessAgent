@@ -152,6 +152,9 @@ class AccessAgentServer:
         # 从队列取下一个待执行任务
         task_id = await self.store.queue.get()
         record = self.store.get(task_id)
+        if record is None:
+            print(f"[错误] 任务 {task_id} 在 store 中不存在，跳过")
+            return
         task = record.task
 
         print(f"[WS] 开始执行任务 [{task_id}]：{task}")
@@ -159,7 +162,8 @@ class AccessAgentServer:
 
         await websocket.send(json.dumps({"type": "task", "task": task}))
 
-        plan = self.memory.find_similar(task)
+        # find_similar 返回 None 或 steps 列表；空列表视同未找到，强制重新规划
+        plan = self.memory.find_similar(task) or None
         step_index = 0
         history = []
         action_log = []
