@@ -491,6 +491,7 @@ class AccessAgentServer:
                         )
                         usage.add_text(replan_usage)
                         print(f"[Token] 重规划用量：{replan_usage}")
+                        step_index = 0        # 新计划从第 0 步开始
                         consecutive_failures = 0
                         failure_reason = ""
 
