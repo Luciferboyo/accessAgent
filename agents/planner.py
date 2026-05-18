@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from models.llm import TextLLM, TokenUsage
 from utils import extract_json
 
@@ -19,6 +20,15 @@ SYSTEM = """你是一个手机自动化规划专家。
   例：不要写"逐一关闭所有X" → 应写"关闭第一个非目标标签页"、"关闭下一个非目标标签页"……或合并写"关闭一个非目标标签页（执行器将重复此步直到全部关闭）"
 - 不要合并多个操作到一个步骤中
 
+⚠️ 时效性数据搜索规则（体育赛事、股价、天气、新闻等）：
+- 搜索词中必须包含 prompt 中提供的【今天日期】，不要使用模糊词"今天"、"今日"，否则搜索结果可能是历史数据
+- 优先使用英文关键词组合搜索专业数据：
+  - 体育比赛统计：用 "box score YYYY-MM-DD"、"game stats" 等，会直接显示结构化数据表格
+  - 股票/指数：用 股票代码 + "stock price"
+  - 天气：用 城市名 + "weather forecast"
+- 避免只用中文通用词（如"NBA骑士比赛数据"），这类词容易进入直播赛程/综合门户站而非统计数据页
+- 对于体育球员数据：搜索 "[队名] box score [YYYY-MM-DD]" 可直接跳到包含所有球员数据的统计页，无需逐个球员访问
+
 输出 JSON 格式：{"steps": ["步骤1", "步骤2", ...]}
 
 示例（发送消息任务）：
@@ -29,17 +39,22 @@ SYSTEM = """你是一个手机自动化规划专家。
   "确认消息已出现在对话框中，操作成功"
 ]}
 
-示例（浏览器搜索任务）：
+示例（体育数据查询任务，今天是2026-05-18）：
 {"steps": [
-  "使用 search_web 直接搜索目标关键词",
-  "滚动查看搜索结果，找到目标信息",
-  "将收集到的信息整理成列表汇报给用户"
+  "使用 search_web 搜索 'Cavaliers box score 2026-05-18'",
+  "在搜索结果页面找到骑士队比赛的球员数据表格",
+  "滚动查看完整球员统计数据（得分、篮板、助攻等）",
+  "将所有球员的比赛数据整理后汇报给用户"
 ]}"""
 
 
 class Planner:
     def __init__(self, llm: TextLLM):
         self.llm = llm
+
+    @staticmethod
+    def _today() -> str:
+        return date.today().strftime("%Y-%m-%d")
 
     def make_plan(self, task: str, ui_text: str,
                   hint: dict = None) -> tuple[list[str], TokenUsage]:
@@ -57,7 +72,9 @@ class Planner:
             if parts:
                 hint_text = "\n【上次经验参考（请避免重复相同弯路，尝试新路径）】\n" + "\n".join(parts) + "\n"
 
+        today = self._today()
         prompt = f"""任务：{task}
+今天日期：{today}（请在所有涉及时效性数据的搜索词中使用此日期，不要使用"今天"等模糊词）
 {hint_text}
 当前界面元素：
 {ui_text}
@@ -74,7 +91,9 @@ class Planner:
     def revise_plan(self, task: str, original_plan: list[str],
                     completed: int, failure_reason: str,
                     ui_text: str) -> tuple[list[str], TokenUsage]:
+        today = self._today()
         prompt = f"""任务：{task}
+今天日期：{today}
 原计划：{json.dumps(original_plan, ensure_ascii=False)}
 已完成步骤数：{completed}
 失败原因：{failure_reason}
