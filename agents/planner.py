@@ -1,0 +1,66 @@
+import json
+from models.llm import TextLLM, TokenUsage
+
+SYSTEM = """你是一个手机自动化规划专家。
+用户会给你一个任务描述和当前界面的 UI 元素信息。
+请将任务拆解为有序的子步骤列表，每个步骤要具体明确，不能跳步。
+
+可用的特殊动作（执行器支持）：
+- search_web(query)：直接用 Chrome 打开搜索页面，无需手动操作地址栏，是浏览器搜索的首选方式
+
+规划规则：
+- 每个步骤只描述一个操作
+- 【重要】涉及网页搜索时，必须使用 search_web 动作直接搜索，禁止规划"点击地址栏"、"输入网址"等手动步骤
+- 涉及信息收集时，最后一步必须是"将收集到的信息整理并汇报给用户"
+- 不要合并多个操作到一个步骤中
+
+输出 JSON 格式：{"steps": ["步骤1", "步骤2", ...]}
+
+示例（浏览器搜索任务）：
+{"steps": [
+  "使用 search_web 直接搜索目标关键词",
+  "等待搜索结果页面加载完成",
+  "滚动查看搜索结果，找到目标信息",
+  "读取页面中的目标信息",
+  "将收集到的信息整理成列表汇报给用户"
+]}"""
+
+
+class Planner:
+    def __init__(self, llm: TextLLM):
+        self.llm = llm
+
+    def make_plan(self, task: str, ui_text: str) -> tuple[list[str], TokenUsage]:
+        prompt = f"""任务：{task}
+
+当前界面元素：
+{ui_text}
+
+请拆解任务步骤。"""
+        rsp, usage = self.llm.predict(prompt, system=SYSTEM)
+
+        try:
+            data = json.loads(rsp[rsp.find("{"):rsp.rfind("}") + 1])
+            return data.get("steps", [task]), usage
+        except Exception:
+            return [task], usage
+
+    def revise_plan(self, task: str, original_plan: list[str],
+                    completed: int, failure_reason: str,
+                    ui_text: str) -> tuple[list[str], TokenUsage]:
+        prompt = f"""任务：{task}
+原计划：{json.dumps(original_plan, ensure_ascii=False)}
+已完成步骤数：{completed}
+失败原因：{failure_reason}
+
+当前界面元素：
+{ui_text}
+
+请重新规划剩余步骤。"""
+        rsp, usage = self.llm.predict(prompt, system=SYSTEM)
+
+        try:
+            data = json.loads(rsp[rsp.find("{"):rsp.rfind("}") + 1])
+            return data.get("steps", original_plan[completed:]), usage
+        except Exception:
+            return original_plan[completed:], usage

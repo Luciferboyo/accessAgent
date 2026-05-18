@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# 环境变量（含 API Key，绝对不能上传）
+.env
+.env.*
+
+# 截图和报告（运行时生成）
+screenshots/
+mock_screenshots/
+reports/
+
+# 任务记忆（本地数据）
+memory/task_flows.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 系统文件
+.DS_Store
+Thumbs.db
