@@ -114,37 +114,44 @@ class AccessAgentServer:
                                     ping_interval=None):
             await asyncio.Future()
 
-    async def _classify_task(self, task: str) -> bool:
+    async def _classify_task(self, task: str) -> str:
         """
-        用 LLM 判断任务类型：
-        - True  = 信息收集类（目标是让用户知道某些信息），必须用 report 结束
-        - False = 纯操作类（目标是完成某个动作），用 finish 结束
+        用 LLM 判断任务类型，返回以下三种之一：
+        - "info"      信息收集类：目标是让用户获得某些信息，必须用 report 结束
+        - "operation" 纯操作类：完成动作即可，用 finish 结束（打开应用、调整设置等）
+        - "verify"    操作+验证类：完成操作后需确认结果成功，再用 finish 结束
+                      （发消息需看到消息出现、点赞需看到已点赞、转账需看到成功提示）
         只调用一次，结果缓存在 handle() 里。
         """
         prompt = f"""判断下面这个手机自动化任务的类型：
 
 任务：{task}
 
-任务类型定义：
-- 信息收集类：用户最终目的是"获得某些信息"（如查询数据、搜索内容、读取结果、告知用户某个值）
-- 纯操作类：用户最终目的是"完成某个操作"（如发消息、打开应用、修改设置、拍照、转账）
+三种类型定义：
+- info（信息收集）：用户最终目的是"获得某些信息"（查询数据、搜索内容、读取结果、告知用户某个值）
+- operation（纯操作）：完成动作即可，不需要确认结果（打开应用、调整系统设置、拍照、截图）
+- verify（操作+验证）：需要完成某个操作，且必须在界面上看到成功标志才算完成
+  （发送消息需看到消息显示在对话框、点赞需看到按钮变色、转账需看到成功页面、预订需看到确认单）
 
-注意：
-- 有些任务可能先操作再收集信息，以最终目的为准
-- 如果任务里有"告诉我"、"汇报"、"查询结果"等，通常是信息收集类
-- 如果任务里有"发送"、"打开"、"设置"、"拍"等，通常是纯操作类
+判断优先级：
+1. 含"告诉我"、"查询"、"搜索"、"汇报"→ info
+2. 含"发送"、"提交"、"转账"、"预订"、"点赞"、"关注"、"评论"等需要确认结果的 → verify
+3. 含"打开"、"设置"、"调整"、"拍照"等不需要确认的 → operation
 
-只输出 JSON：{{"is_info_task": true/false, "reason": "一句话说明判断依据"}}"""
+只输出 JSON：{{"task_type": "info/operation/verify", "reason": "一句话说明判断依据"}}"""
 
         try:
             rsp, _ = await self._in_thread(self.text_llm.predict, prompt)
             data = extract_json(rsp)
-            result = data.get("is_info_task", False)
-            print(f"[任务分类] {'信息收集类' if result else '纯操作类'} | {data.get('reason', '')}")
-            return result
+            task_type = data.get("task_type", "operation")
+            if task_type not in ("info", "operation", "verify"):
+                task_type = "operation"
+            label = {"info": "信息收集类", "operation": "纯操作类", "verify": "操作+验证类"}
+            print(f"[任务分类] {label[task_type]} | {data.get('reason', '')}")
+            return task_type
         except Exception as e:
-            print(f"[任务分类] 解析失败（{e}），默认为操作类")
-            return False
+            print(f"[任务分类] 解析失败（{e}），默认为 operation")
+            return "operation"
 
     async def handle(self, websocket):
         print("[WS] Android App 已连接，等待任务...")
@@ -175,9 +182,11 @@ class AccessAgentServer:
         final_result = None
         success = False
         report_rejected_count = 0  # report 被校验拒绝的次数，超限后强制放行
+        verify_failed_count = 0    # verify 任务 finish 未通过次数，超限后强制放行
 
         # 任务开始时分类一次，后续复用，不重复调用 LLM
-        is_info_task = await self._classify_task(task)
+        # task_type: "info" | "operation" | "verify"
+        task_type = await self._classify_task(task)
 
         current_state = await self._request_state(websocket)
 
@@ -205,7 +214,7 @@ class AccessAgentServer:
                     print(f"[Token] 规划用量：{plan_usage}")
 
                 if plan is None or step_index >= len(plan):
-                    if is_info_task:
+                    if task_type == "info":
                         # 信息收集类任务走完所有计划步骤，但没有 report，强制补一步
                         print("[注意] 信息收集任务步骤已完成，但尚未汇报结果，追加汇报步骤")
                         if plan is None:
@@ -275,12 +284,43 @@ class AccessAgentServer:
 
                 # ── 5. 任务完成或汇报结果 ────────────────────────
                 if action.get("action") == "finish":
-                    if is_info_task:
+                    if task_type == "info":
                         print("[拦截] 信息收集任务不允许 finish，继续执行...")
                         failure_reason = "任务需要收集信息并用 report 汇报结果，绝对不能用 finish 结束"
                         consecutive_failures += 1
                         current_state = await self._request_state(websocket)
                         continue
+
+                    if task_type == "verify":
+                        # 操作+验证类：finish 前先确认操作结果
+                        MAX_VERIFY_FAILURES = 3
+                        if verify_failed_count >= MAX_VERIFY_FAILURES:
+                            print(f"[放行] 操作验证已失败 {verify_failed_count} 次，强制接受 finish")
+                            verified, verify_reason = True, "多次验证后强制放行"
+                        else:
+                            print("[验证] 检查操作是否成功...")
+                            verified, verify_reason = await self._verify_operation(task, ui_text)
+
+                        if not verified:
+                            verify_failed_count += 1
+                            remaining = MAX_VERIFY_FAILURES - verify_failed_count
+                            print(f"[拦截] 操作结果未确认（第 {verify_failed_count} 次）：{verify_reason}")
+                            if remaining > 0:
+                                failure_reason = (
+                                    f"操作尚未确认成功：{verify_reason}。"
+                                    f"请继续操作直到界面出现明确的成功标志。"
+                                    f"（还有 {remaining} 次机会）"
+                                )
+                            else:
+                                failure_reason = (
+                                    f"操作结果多次无法确认（{verify_reason}）。"
+                                    f"这是最后机会：请截图确认当前界面状态后再决定是否 finish。"
+                                )
+                            consecutive_failures += 1
+                            current_state = await self._request_state(websocket)
+                            continue
+                        print(f"[验证] 操作已确认成功：{verify_reason}")
+
                     await websocket.send(json.dumps({"type": "finish", "message": "任务完成"}))
                     self.memory.save_flow(task, plan, action_log)
                     success = True
@@ -503,6 +543,36 @@ Agent 准备汇报的内容：
             return data.get("valid", True), data.get("missing", "")
         except Exception as e:
             print(f"[校验] 解析失败（{e}），默认放行")
+            return True, ""
+
+    async def _verify_operation(self, task: str, ui_text: str) -> tuple[bool, str]:
+        """
+        操作+验证类：通过当前界面文字判断操作是否真正成功完成。
+        返回 (是否成功, 原因说明)
+        """
+        prompt = f"""你是手机自动化验证专家。
+
+用户的任务：{task}
+
+当前界面元素：
+{ui_text}
+
+请判断：该操作是否已经成功完成并在界面上有明确体现？
+
+判断标准：
+- 必须在当前界面上看到操作成功的明确标志
+  （如消息已出现在对话框、"发送成功"提示、点赞按钮状态改变、转账成功页面、预订确认单等）
+- 仅仅"操作已执行"不代表成功，需要有可见的结果
+- 如果界面只是回到了原始状态或没有任何成功标志，判为未完成
+
+只输出 JSON：{{"success": true/false, "reason": "一句话说明判断依据"}}"""
+
+        try:
+            rsp, _ = await self._in_thread(self.text_llm.predict, prompt)
+            data = extract_json(rsp)
+            return data.get("success", False), data.get("reason", "")
+        except Exception as e:
+            print(f"[验证] 解析失败（{e}），默认放行")
             return True, ""
 
     def _save_report(self, task: str, content: str):
