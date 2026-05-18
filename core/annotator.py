@@ -29,9 +29,12 @@ class ScreenAnnotator:
 
             draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
 
-            label_bg = [x1, y1 - 28, x1 + 32, y1]
+            # 标签背景：y 不能为负，贴近顶部时往下偏移
+            label_top = max(0, y1 - 28)
+            label_bottom = label_top + 28
+            label_bg = [x1, label_top, x1 + 32, label_bottom]
             draw.rectangle(label_bg, fill=color)
-            draw.text((x1 + 4, y1 - 26), str(idx), fill="white", font=font)
+            draw.text((x1 + 4, label_top + 2), str(idx), fill="white", font=font)
 
         img.save(save_path)
         return save_path

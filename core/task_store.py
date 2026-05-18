@@ -51,3 +51,10 @@ class TaskStore:
         if record:
             for k, v in kwargs.items():
                 setattr(record, k, v)
+
+    def delete(self, task_id: str) -> bool:
+        """删除任务记录，返回是否成功删除"""
+        if task_id in self.tasks:
+            del self.tasks[task_id]
+            return True
+        return False

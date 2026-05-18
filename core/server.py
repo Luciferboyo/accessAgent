@@ -204,6 +204,8 @@ class AccessAgentServer:
                     if is_info_task:
                         # 信息收集类任务走完所有计划步骤，但没有 report，强制补一步
                         print("[注意] 信息收集任务步骤已完成，但尚未汇报结果，追加汇报步骤")
+                        if plan is None:
+                            plan = []
                         plan.append("将目前收集到的所有信息整理后用 report 汇报给用户，如果信息不完整请说明原因")
                         failure_reason = "所有规划步骤已完成，现在必须用 report 汇报收集到的内容"
                         continue
@@ -337,7 +339,11 @@ class AccessAgentServer:
                 action_log.append(action)
 
                 result_raw = await websocket.recv()
-                result = json.loads(result_raw)
+                try:
+                    result = json.loads(result_raw)
+                except json.JSONDecodeError:
+                    print(f"[警告] 动作执行响应解析失败，原始内容：{str(result_raw)[:100]}")
+                    result = {"status": "unknown"}
                 print(f"[App] 执行状态：{result.get('status')}")
 
                 # ── 7. 获取新状态（复用为下一步）────────────────
@@ -524,7 +530,11 @@ Agent 准备汇报的内容：
     async def _request_screenshot(self, websocket) -> str:
         await websocket.send(json.dumps({"type": "request_screenshot"}))
         raw = await websocket.recv()
-        return json.loads(raw).get("screenshot", "")
+        try:
+            return json.loads(raw).get("screenshot", "")
+        except json.JSONDecodeError as e:
+            print(f"[警告] _request_screenshot 响应解析失败（{e}），返回空字符串")
+            return ""
 
     def _build_command(self, action: dict, ui_elements: list[dict]) -> dict | None:
         """

@@ -96,7 +96,7 @@ def create_app(store: TaskStore) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
         if record.status in ("pending", "running"):
             raise HTTPException(status_code=400, detail="任务正在执行中，无法删除")
-        del _store.tasks[task_id]
+        _store.delete(task_id)
         return {"message": f"任务 {task_id} 已删除"}
 
     @app.get("/health", summary="健康检查")

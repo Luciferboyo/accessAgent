@@ -72,7 +72,7 @@ class TaskMemory:
     def find_similar(self, task: str, threshold: float = 0.85) -> list[str] | None:
         """
         查找相似任务的历史步骤。
-        相似度需超过 threshold（默认 0.5）才复用。
+        相似度需超过 threshold（默认 0.85）才复用。
         """
         best_score = 0.0
         best_steps = None
