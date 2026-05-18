@@ -51,22 +51,27 @@ class UIAnalyzer:
         """
         判断当前步骤是否需要截图：
         - 存在验证码类关键词
-        - 元素普遍没有有效 text/desc（纯图形界面）
+        - 可见元素中普遍没有有效 text/desc（纯图形界面）
         - 上一步执行结果不确定
+
+        注意：仅对 bounds 有效的可见元素做比例判断，
+        避免大量零尺寸虚拟节点拉低比例，导致误触发截图。
         """
         for kw in self.NEEDS_VISION_KEYWORDS:
             for elem in ui_elements:
                 if kw in elem.get("text", "") or kw in elem.get("content_desc", ""):
                     return True
 
-        if not ui_elements:
+        # 只统计可见元素
+        visible = [e for e in ui_elements if self._valid_bounds(e)]
+        if not visible:
             return True
 
         meaningful = [
-            e for e in ui_elements
+            e for e in visible
             if e.get("text") or e.get("content_desc") or e.get("resource_id")
         ]
-        if len(meaningful) < len(ui_elements) * 0.3:
+        if len(meaningful) < len(visible) * 0.3:
             return True
 
         if "uncertain" in last_action_result or "unknown" in last_action_result:

@@ -405,11 +405,14 @@ class AccessAgentServer:
                 # ── 6. 执行动作 ──────────────────────────────────
                 cmd = self._build_command(action, ui_elements)
                 if cmd is None:
-                    # index 越界，不发送指令，直接标记失败重试
-                    print("[警告] 元素 index 越界，跳过本次指令，重新获取界面状态")
+                    # index 越界或元素 bounds 无效（不可见），跳过指令直接重试
+                    print("[警告] 元素不存在或不可见，跳过本次指令，重新获取界面状态")
                     consecutive_failures += 1
                     total_failures += 1
-                    failure_reason = f"AI 指定的元素编号不存在（共 {len(ui_elements)} 个元素），请重新选择"
+                    failure_reason = (
+                        f"AI 指定的元素编号不存在或该元素不可见（零尺寸）。"
+                        f"当前共 {len(ui_elements)} 个元素，请只选择截图或文字描述中实际可见的元素编号。"
+                    )
                     current_state = await self._request_state(websocket)
                     continue
 
