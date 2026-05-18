@@ -2,6 +2,33 @@ import json
 import re
 
 
+def _escape_string_newlines(s: str) -> str:
+    """
+    只转义 JSON 字符串值内部的原始换行符，不影响结构性换行。
+    逐字符扫描，追踪是否处于引号内。
+    """
+    result = []
+    in_string = False
+    escape_next = False
+    for ch in s:
+        if escape_next:
+            result.append(ch)
+            escape_next = False
+        elif ch == '\\':
+            result.append(ch)
+            escape_next = True
+        elif ch == '"':
+            in_string = not in_string
+            result.append(ch)
+        elif in_string and ch == '\n':
+            result.append('\\n')
+        elif in_string and ch == '\r':
+            result.append('\\r')
+        else:
+            result.append(ch)
+    return ''.join(result)
+
+
 def extract_json(text: str) -> dict:
     """
     从 LLM 输出中稳健提取 JSON，兼容常见问题：
@@ -10,8 +37,8 @@ def extract_json(text: str) -> dict:
     - JSON 前后有多余文字
     - 字符串值中的原始换行符（导致 JSONDecodeError）
     """
-    text = text.replace('“', '"').replace('”', '"')   # " "
-    text = text.replace('‘', "'").replace('’', "'")   # ' '
+    text = text.replace('“', '"').replace('”', '"')   # 中文双引号
+    text = text.replace('‘', "'").replace('’', "'")   # 中文单引号
     text = re.sub(r'```(?:json)?\s*', '', text).replace('```', '')
     start = text.find('{')
     end = text.rfind('}')
@@ -25,7 +52,6 @@ def extract_json(text: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # 第二次尝试：将字符串值中的原始换行符转义为 \n
-    # 原理：JSON 合法字符串中的换行必须是 \n（两字符），原始 \n（一字符）非法
-    repaired = json_str.replace('\n', '\\n').replace('\r', '\\r')
+    # 第二次尝试：只转义字符串值内部的原始换行符，保留结构性换行
+    repaired = _escape_string_newlines(json_str)
     return json.loads(repaired)

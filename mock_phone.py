@@ -57,7 +57,9 @@ async def take_screenshot(step: int) -> str:
         raise RuntimeError("screencap 超时")
 
     print("[截图] pull...")
-    await adb_async(f"pull {remote} {local}", timeout=20)
+    pull_ret = await adb_async(f"pull {remote} {local}", timeout=20)
+    if pull_ret in ("ERROR", "TIMEOUT") or not os.path.exists(local):
+        raise RuntimeError(f"pull 截图到本地失败（adb 返回：{pull_ret}）")
 
     # 压缩截图（在线程池中执行 PIL 操作）
     def compress():
@@ -167,7 +169,8 @@ async def do_type(x: int, y: int, text: str):
 
     if _is_ascii(text):
         # 纯 ASCII：直接用 adb input text
-        safe_text = text.replace(" ", "%s").replace("'", "")
+        # 空格用 %s 转义；单引号用 shell 转义序列 '\'' 处理，避免直接删除
+        safe_text = text.replace(" ", "%s").replace("'", "'\\''")
         await adb_async(f"shell input text '{safe_text}'")
     else:
         # 含中文/特殊字符：优先尝试 ADBKeyboard broadcast
@@ -176,7 +179,7 @@ async def do_type(x: int, y: int, text: str):
             # 降级：逐字符用 keyevent，仅适用于 ASCII 部分
             print("[警告] ADBKeyboard 不可用，尝试降级输入（中文可能丢失）")
             safe_text = "".join(c if ord(c) < 128 else "" for c in text)
-            safe_text = safe_text.replace(" ", "%s").replace("'", "")
+            safe_text = safe_text.replace(" ", "%s").replace("'", "'\\''")
             if safe_text:
                 await adb_async(f"shell input text '{safe_text}'")
 

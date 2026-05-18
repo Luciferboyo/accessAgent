@@ -194,10 +194,13 @@ class AccessAgentServer:
                         self.planner.make_plan, task, ui_text
                     )
                     usage.add_text(plan_usage)
+                    # 生成失败时保底：把整个任务作为一个步骤
+                    if not plan:
+                        plan = [task]
                     print(f"[Planner] 计划步骤：{plan}")
                     print(f"[Token] 规划用量：{plan_usage}")
 
-                if step_index >= len(plan):
+                if plan is None or step_index >= len(plan):
                     if is_info_task:
                         # 信息收集类任务走完所有计划步骤，但没有 report，强制补一步
                         print("[注意] 信息收集任务步骤已完成，但尚未汇报结果，追加汇报步骤")
@@ -245,10 +248,13 @@ class AccessAgentServer:
 
                     print(f"[Vision] 触发截图，原因：{trigger}")
                     screenshot_b64 = await self._request_screenshot(websocket)
-                    img_path = self.annotator.save_screenshot(
+                    # annotator 做文件 IO + PIL 处理，放线程池避免阻塞事件循环
+                    img_path = await self._in_thread(
+                        self.annotator.save_screenshot,
                         screenshot_b64, config.SCREENSHOT_DIR, global_step
                     )
-                    annotated = self.annotator.annotate(
+                    annotated = await self._in_thread(
+                        self.annotator.annotate,
                         img_path, ui_elements,
                         img_path.replace(".png", "_labeled.png")
                     )
@@ -509,7 +515,11 @@ Agent 准备汇报的内容：
     async def _request_state(self, websocket) -> dict:
         await websocket.send(json.dumps({"type": "request_state"}))
         raw = await websocket.recv()
-        return json.loads(raw)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            print(f"[警告] _request_state 响应解析失败（{e}），返回空状态")
+            return {"ui_elements": []}
 
     async def _request_screenshot(self, websocket) -> str:
         await websocket.send(json.dumps({"type": "request_screenshot"}))

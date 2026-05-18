@@ -1,6 +1,10 @@
 import base64
+import mimetypes
 import os
 from openai import OpenAI
+
+# HTTP 请求超时（秒）：连接 + 读取；比 _in_thread 的 90s 略小，确保 SDK 先超时
+_HTTP_TIMEOUT = 60.0
 
 
 class TokenUsage:
@@ -27,7 +31,7 @@ class TextLLM:
 
     def __init__(self, api_key: str, base_url: str, model: str):
         from config import config
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=_HTTP_TIMEOUT)
         self.model = model
         self.price_input = config.TEXT_PRICE_INPUT
         self.price_output = config.TEXT_PRICE_OUTPUT
@@ -75,14 +79,20 @@ class VisionLLM:
 
     def __init__(self, api_key: str, base_url: str, model: str):
         from config import config
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=_HTTP_TIMEOUT)
         self.model = model
         self.price_input = config.VISION_PRICE_INPUT
         self.price_output = config.VISION_PRICE_OUTPUT
 
     def predict(self, prompt: str, image_path: str, system: str = "") -> tuple[str, TokenUsage]:
-        ext = os.path.splitext(image_path)[1].lower()
-        mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"截图文件不存在，无法调用视觉模型：{image_path}")
+
+        # 自动推断 MIME 类型，兼容 jpg/png/webp 等格式
+        mime, _ = mimetypes.guess_type(image_path)
+        if mime not in ("image/jpeg", "image/png", "image/webp", "image/gif"):
+            ext = os.path.splitext(image_path)[1].lower()
+            mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
 
         with open(image_path, "rb") as f:
             image_b64 = base64.b64encode(f.read()).decode()
