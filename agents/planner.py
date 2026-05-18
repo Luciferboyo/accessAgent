@@ -1,5 +1,6 @@
 import json
 from models.llm import TextLLM, TokenUsage
+from utils import extract_json
 
 SYSTEM = """你是一个手机自动化规划专家。
 用户会给你一个任务描述和当前界面的 UI 元素信息。
@@ -40,7 +41,7 @@ class Planner:
         rsp, usage = self.llm.predict(prompt, system=SYSTEM)
 
         try:
-            data = json.loads(rsp[rsp.find("{"):rsp.rfind("}") + 1])
+            data = extract_json(rsp)
             return data.get("steps", [task]), usage
         except Exception:
             return [task], usage
@@ -60,7 +61,7 @@ class Planner:
         rsp, usage = self.llm.predict(prompt, system=SYSTEM)
 
         try:
-            data = json.loads(rsp[rsp.find("{"):rsp.rfind("}") + 1])
+            data = extract_json(rsp)
             return data.get("steps", original_plan[completed:]), usage
         except Exception:
             return original_plan[completed:], usage

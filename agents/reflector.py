@@ -1,5 +1,6 @@
 import json
 from models.llm import TextLLM, TokenUsage
+from utils import extract_json
 
 SYSTEM = """你是手机自动化验证专家。根据操作前后的界面变化，判断该步骤是否成功推进了任务。
 
@@ -50,7 +51,7 @@ class Reflector:
         rsp, usage = self.llm.predict(prompt, system=SYSTEM)
 
         try:
-            data = json.loads(rsp[rsp.find("{"):rsp.rfind("}") + 1])
+            data = extract_json(rsp)
             return data, usage
         except Exception:
             return {"success": False, "reason": "验证解析失败", "progress": "未知"}, usage

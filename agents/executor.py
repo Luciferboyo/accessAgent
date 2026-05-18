@@ -1,5 +1,6 @@
 import json
 from models.llm import TextLLM, VisionLLM, TokenUsage
+from utils import extract_json
 
 TEXT_SYSTEM = """你是手机自动化执行专家。根据当前界面元素和当前步骤，决定下一个操作。
 
@@ -107,8 +108,7 @@ class Executor:
 
     def _parse(self, rsp: str) -> dict:
         try:
-            data = json.loads(rsp[rsp.find("{"):rsp.rfind("}") + 1])
-            return data
+            return extract_json(rsp)
         except Exception:
             return {"action": "need_screenshot", "params": {},
                     "reason": "文本决策解析失败，需要截图确认"}

@@ -2,11 +2,13 @@ import asyncio
 import functools
 import json
 import os
+import re
 import websockets
 from dataclasses import dataclass
 from datetime import datetime
 
 from config import config
+from utils import extract_json
 from models.llm import TextLLM, VisionLLM, TokenUsage
 from agents.planner import Planner
 from agents.executor import Executor
@@ -136,7 +138,7 @@ class AccessAgentServer:
 
         try:
             rsp, _ = await self._in_thread(self.text_llm.predict, prompt)
-            data = json.loads(rsp[rsp.find("{"):rsp.rfind("}") + 1])
+            data = extract_json(rsp)
             result = data.get("is_info_task", False)
             print(f"[任务分类] {'信息收集类' if result else '纯操作类'} | {data.get('reason', '')}")
             return result
@@ -195,6 +197,12 @@ class AccessAgentServer:
                     print(f"[Token] 规划用量：{plan_usage}")
 
                 if step_index >= len(plan):
+                    if is_info_task:
+                        # 信息收集类任务走完所有计划步骤，但没有 report，强制补一步
+                        print("[注意] 信息收集任务步骤已完成，但尚未汇报结果，追加汇报步骤")
+                        plan.append("将目前收集到的所有信息整理后用 report 汇报给用户，如果信息不完整请说明原因")
+                        failure_reason = "所有规划步骤已完成，现在必须用 report 汇报收集到的内容"
+                        continue
                     print("[完成] 所有步骤执行完毕")
                     await websocket.send(json.dumps({"type": "finish", "message": "任务完成"}))
                     self.memory.save_flow(task, plan, action_log)
@@ -214,11 +222,16 @@ class AccessAgentServer:
                 print(f"[Token] 文本决策：{text_usage}")
 
                 # ── 4. 判断是否需要截图 ──────────────────────────
-                need_vision = (
-                    action.get("action") == "need_screenshot"
-                    or self.analyzer.needs_screenshot(ui_elements)
-                    or consecutive_failures >= 2   # 连续失败 2 次才触发，避免过度调用 Vision
-                )
+                # 文本模型已决定 report/finish 时，不触发 Vision（避免被覆盖）
+                text_action = action.get("action")
+                if text_action in ("report", "finish"):
+                    need_vision = False
+                else:
+                    need_vision = (
+                        text_action == "need_screenshot"
+                        or self.analyzer.needs_screenshot(ui_elements)
+                        or consecutive_failures >= 2
+                    )
 
                 vision_usage = None
                 if need_vision:
@@ -447,7 +460,7 @@ Agent 准备汇报的内容：
 
         try:
             rsp, _ = await self._in_thread(self.text_llm.predict, prompt)
-            data = json.loads(rsp[rsp.find("{"):rsp.rfind("}") + 1])
+            data = extract_json(rsp)
             return data.get("valid", True), data.get("missing", "")
         except Exception as e:
             print(f"[校验] 解析失败（{e}），默认放行")
