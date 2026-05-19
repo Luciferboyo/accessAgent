@@ -57,7 +57,8 @@ class Planner:
         return date.today().strftime("%Y-%m-%d")
 
     def make_plan(self, task: str, ui_text: str,
-                  hint: dict = None) -> tuple[list[str], TokenUsage]:
+                  hint: dict = None,
+                  screen_desc: str = "") -> tuple[list[str], TokenUsage]:
         # 有上次部分成功的经验时，拼入 prompt 让 Planner 避免重复走弯路
         hint_text = ""
         if hint:
@@ -72,14 +73,17 @@ class Planner:
             if parts:
                 hint_text = "\n【上次经验参考（请避免重复相同弯路，尝试新路径）】\n" + "\n".join(parts) + "\n"
 
+        # 定向截图生成的当前页面描述（帮助 Planner 了解起始位置，避免规划冗余导航步骤）
+        screen_context = f"\n【当前页面状态】{screen_desc}\n" if screen_desc else ""
+
         today = self._today()
         prompt = f"""任务：{task}
 今天日期：{today}（请在所有涉及时效性数据的搜索词中使用此日期，不要使用"今天"等模糊词）
-{hint_text}
+{screen_context}{hint_text}
 当前界面元素：
 {ui_text}
 
-请拆解任务步骤。"""
+请拆解任务步骤。如果【当前页面状态】显示已在任务相关页面，请直接从当前位置规划后续步骤，无需重复导航。"""
         rsp, usage = self.llm.predict(prompt, system=SYSTEM)
 
         try:

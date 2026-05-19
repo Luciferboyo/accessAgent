@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import functools
 import json
 import os
@@ -88,6 +89,7 @@ class AccessAgentServer:
         vision_llm = VisionLLM(config.VISION_API_KEY, config.VISION_BASE_URL, config.VISION_MODEL)
 
         self.text_llm = text_llm
+        self.vision_llm = vision_llm
         self.planner = Planner(text_llm)
         self.executor = Executor(text_llm, vision_llm)
         self.reflector = Reflector(text_llm)
@@ -106,6 +108,35 @@ class AccessAgentServer:
             return await asyncio.wait_for(coro, timeout=timeout)
         except asyncio.TimeoutError:
             raise RuntimeError(f"LLM 调用超时（>{timeout}s），请检查网络或 API 状态")
+
+    async def _describe_screen(self, websocket) -> tuple[str, TokenUsage]:
+        """
+        任务开始前，用 Vision 模型对当前屏幕做一句话定向描述。
+        让 Planner 了解起始位置，避免规划冗余的导航步骤。
+        失败时静默降级，不影响主流程。
+        """
+        try:
+            screenshot_b64 = await self._request_screenshot(websocket)
+            # 保存初始截图（不标注，仅用于描述）
+            img_path = os.path.join(config.SCREENSHOT_DIR, "init.png")
+            with open(img_path, "wb") as f:
+                f.write(base64.b64decode(screenshot_b64))
+
+            prompt = (
+                "请用一句话（不超过80字）描述当前手机屏幕的状态。\n"
+                "包含：① 所在的应用或页面类型  ② 页面的主要内容或当前 URL\n"
+                "直接输出描述，不加任何前缀或解释。\n"
+                "示例：Chrome浏览器显示 Google 搜索结果页，已搜索"骑士比赛"，顶部有比赛分数卡片。\n"
+                "示例：Android 主屏幕，显示应用图标，当前无任何应用打开。\n"
+                "示例：微信聊天列表页，显示多个联系人的最近消息。"
+            )
+            rsp, usage = self.vision_llm.predict(prompt, img_path)
+            desc = rsp.strip()
+            print(f"[定向] 当前页面：{desc}")
+            return desc, usage
+        except Exception as e:
+            print(f"[定向] 页面描述失败（{e}），跳过定向截图")
+            return "", TokenUsage()
 
     async def start(self, host: str, port: int):
         print(f"[WS] AccessAgent WebSocket 启动，监听 ws://{host}:{port}")
@@ -216,9 +247,14 @@ class AccessAgentServer:
 
                 # ── 2. 首轮生成计划 ──────────────────────────────
                 if plan is None:
+                    # 定向截图：先用 Vision 描述当前页面，帮助 Planner 了解起始位置
+                    print("[定向] 截图分析当前页面状态...")
+                    screen_desc, desc_usage = await self._describe_screen(websocket)
+                    usage.add_vision(desc_usage)
+
                     print("[Planner] 生成任务计划...")
                     plan, plan_usage = await self._in_thread(
-                        self.planner.make_plan, task, ui_text, planner_hint
+                        self.planner.make_plan, task, ui_text, planner_hint, screen_desc
                     )
                     usage.add_text(plan_usage)
                     # 生成失败时保底：把整个任务作为一个步骤
