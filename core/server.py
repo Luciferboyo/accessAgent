@@ -569,6 +569,8 @@ class AccessAgentServer:
                         )
                         usage.add_text(replan_usage)
                         print(f"[Token] 重规划用量：{replan_usage}")
+                        if not plan:
+                            plan = [task]   # LLM 返回空列表时保底，避免假成功
                         step_index = 0        # 新计划从第 0 步开始
                         consecutive_failures = 0
                         failure_reason = ""
@@ -809,6 +811,12 @@ Agent 准备汇报的内容：
 
         if act == "search_web":
             return {"type": "search_web", "query": params.get("query", "")}
+
+        if act == "back":
+            return {"type": "back"}
+
+        if act == "home":
+            return {"type": "home"}
 
         # 未知动作类型（LLM 幻觉）：拒绝执行，返回 None 触发重试，而非盲目转发给手机
         print(f"[警告] _build_command 遇到未知动作类型 '{act}'，跳过")

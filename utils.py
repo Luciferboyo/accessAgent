@@ -54,11 +54,22 @@ def extract_json(text: str) -> dict:
     # 中文单引号统一替换
     text = text.replace('‘', "'").replace('’', "'")
 
+    # 括号计数法提取第一个完整 {...} 对象，避免多 JSON 对象时 rfind('}') 切错
     start = text.find('{')
-    end = text.rfind('}')
-    if start == -1 or end == -1:
+    if start == -1:
         raise ValueError("未找到 JSON 对象")
-    json_str = text[start:end + 1]
+    depth = 0
+    json_str = None
+    for i, ch in enumerate(text[start:], start):
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                json_str = text[start:i + 1]
+                break
+    if json_str is None:
+        raise ValueError("JSON 对象括号不匹配")
 
     # 策略 1：中文双弯引号作为 JSON 定界符 → 替换为直引号
     s1 = json_str.replace('“', '"').replace('”', '"')

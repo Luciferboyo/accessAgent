@@ -40,3 +40,19 @@ class Config:
 
 
 config = Config()
+
+
+def _validate_config():
+    missing = []
+    if not config.TEXT_API_KEY:
+        missing.append("TEXT_API_KEY")
+    if not config.VISION_API_KEY:
+        missing.append("VISION_API_KEY")
+    if missing:
+        raise EnvironmentError(
+            f"缺少必要环境变量：{', '.join(missing)}。"
+            f"请在 .env 文件中配置后重新启动。"
+        )
+
+
+_validate_config()
