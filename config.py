@@ -30,9 +30,9 @@ class Config:
     PORT: int = 8765
 
     # Agent 配置
-    MAX_STEPS: int = 30          # 最大总步数
-    MAX_RETRIES: int = 3         # 连续失败多少次触发重新规划
-    MAX_TOTAL_FAILURES: int = 10 # 累计失败上限，超过直接放弃
+    MAX_STEPS: int = 50          # 最大总步数（复杂任务如TG转发需要更多步）
+    MAX_RETRIES: int = 2         # 连续失败多少次触发重新规划（更快切换策略）
+    MAX_TOTAL_FAILURES: int = 12 # 累计失败上限，超过直接放弃
     MAX_REPLANS: int = 3         # 最多重新规划次数，超过直接放弃
 
     # 记忆匹配阈值

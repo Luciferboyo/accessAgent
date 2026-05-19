@@ -345,6 +345,18 @@ class AccessAgentServer:
                         plan.append(report_step)
                         failure_reason = "所有规划步骤已完成，现在必须用 report 汇报收集到的内容"
                         continue
+                    # verify 任务需要在所有步骤完成后再做一次终态确认
+                    if task_type == "verify":
+                        print("[完成] 所有步骤执行完毕，执行操作结果终态验证...")
+                        verified, verify_reason, verify_op_usage = await self._verify_operation(task, ui_text)
+                        usage.add_text(verify_op_usage)
+                        if not verified:
+                            print(f"[验证] 终态验证未通过：{verify_reason}，继续尝试")
+                            consecutive_failures += 1
+                            total_failures += 1
+                            failure_reason = verify_reason or "界面未显示操作成功的明确信号"
+                            continue
+                        print(f"[验证] 终态验证通过：{verify_reason}")
                     print("[完成] 所有步骤执行完毕")
                     await websocket.send(json.dumps({"type": "finish", "message": "任务完成"}))
                     self.memory.save_flow(task, plan, action_log, quality="full")
@@ -365,7 +377,8 @@ class AccessAgentServer:
                 # ── 3. 优先文本决策 ──────────────────────────────
                 print("[Text] 尝试文本决策...")
                 action, text_usage = await self._in_thread(
-                    self.executor.decide_text, current_step, step_index, len(plan), ui_text, history, failure_reason
+                    self.executor.decide_text, current_step, step_index, len(plan),
+                    ui_text, history, failure_reason, consecutive_failures
                 )
                 usage.add_text(text_usage)
                 print(f"[Text] {action.get('action')} | {action.get('reason')}")
@@ -413,7 +426,7 @@ class AccessAgentServer:
                     action, vision_usage = await self._in_thread(
                         self.executor.decide_vision,
                         current_step, step_index, len(plan), annotated, ui_text, history,
-                        failure_reason, screen_size, img_size
+                        failure_reason, screen_size, img_size, consecutive_failures
                     )
                     usage.add_vision(vision_usage)
                     print(f"[Vision] {action.get('action')} | {action.get('reason')}")
@@ -623,9 +636,13 @@ class AccessAgentServer:
                         print(f"[open_app] 切换成功：{actual_pkg or target_pkg}")
                     reflect_usage = TokenUsage()
                 elif act_name in SKIP_REFLECT:
-                    verify = {"status": "done", "reason": f"{act_name} 系统动作默认成功", "next_hint": ""}
+                    verify = {
+                        "status": "progress",
+                        "reason": f"{act_name} 已执行（系统动作无需反思，继续推进步骤）",
+                        "next_hint": ""
+                    }
                     reflect_usage = TokenUsage()
-                    print(f"[Reflector] 跳过（{act_name} 系统动作）")
+                    print(f"[Reflector] 跳过（{act_name} 系统动作），标记为 progress")
                 else:
                     print("[Reflector] 自我反思...")
                     verify, reflect_usage = await self._in_thread(
@@ -662,7 +679,8 @@ class AccessAgentServer:
                     failure_reason = ""
                 elif reflect_status == "progress":
                     # 有效推进，不计为失败，不换步骤
-                    consecutive_failures = 0
+                    # 用衰减而非全量重置：避免 stuck/progress 交替时永远触不发重规划
+                    consecutive_failures = max(0, consecutive_failures - 1)
                     failure_reason = ""
                     next_hint = verify.get("next_hint", "")
                     if next_hint:
@@ -672,7 +690,13 @@ class AccessAgentServer:
                     consecutive_failures += 1
                     total_failures += 1
                     failure_reason = verify.get("reason", "")
-                    print(f"[失败] 累计失败 {total_failures} 次")
+                    # stuck 时也把 next_hint（替代方案）加入历史，让下一步 Executor 看到
+                    next_hint_stuck = verify.get("next_hint", "")
+                    if next_hint_stuck:
+                        history.append(f"  → 建议改用：{next_hint_stuck}")
+                        # failure_reason 追加替代建议，传给 Executor prompt
+                        failure_reason = f"{failure_reason}；建议改用：{next_hint_stuck}"
+                    print(f"[失败] 累计连续失败 {consecutive_failures} 次（总计 {total_failures} 次）")
 
                     if total_failures >= config.MAX_TOTAL_FAILURES:
                         error_msg = f"累计失败{total_failures}次，{failure_reason}"

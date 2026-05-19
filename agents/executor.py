@@ -107,11 +107,21 @@ class Executor:
 
     def decide_text(self, current_step: str, step_index: int, total_steps: int,
                     ui_text: str, history: list[str],
-                    failure_reason: str = "") -> tuple[dict, TokenUsage]:
-        history_text = "\n".join(history[-5:]) if history else "无"
-        failure_hint = f"\n上一步失败原因：{failure_reason}" if failure_reason else ""
+                    failure_reason: str = "",
+                    consecutive_failures: int = 0) -> tuple[dict, TokenUsage]:
+        history_text = "\n".join(history[-8:]) if history else "无"
         remaining = total_steps - step_index - 1
         progress = f"第 {step_index + 1} 步 / 共 {total_steps} 步，完成后还剩 {remaining} 步"
+
+        if consecutive_failures >= 2:
+            failure_hint = (
+                f"\n\n🚨 当前方法已连续失败 {consecutive_failures} 次，必须换用完全不同的方法！"
+                f"\n失败原因及建议：{failure_reason}"
+            )
+        elif failure_reason:
+            failure_hint = f"\n\n上一步失败原因：{failure_reason}"
+        else:
+            failure_hint = ""
 
         prompt = f"""当前步骤（{progress}）：{current_step}
 
@@ -132,11 +142,21 @@ class Executor:
                       annotated_image: str, ui_text: str, history: list[str],
                       failure_reason: str = "",
                       screen_size: list[int] = None,
-                      img_size: tuple[int, int] = None) -> tuple[dict, TokenUsage]:
-        history_text = "\n".join(history[-5:]) if history else "无"
-        failure_hint = f"\n上一步失败原因：{failure_reason}" if failure_reason else ""
+                      img_size: tuple[int, int] = None,
+                      consecutive_failures: int = 0) -> tuple[dict, TokenUsage]:
+        history_text = "\n".join(history[-8:]) if history else "无"
         remaining = total_steps - step_index - 1
         progress = f"第 {step_index + 1} 步 / 共 {total_steps} 步，完成后还剩 {remaining} 步"
+
+        if consecutive_failures >= 2:
+            failure_hint = (
+                f"\n\n🚨 当前方法已连续失败 {consecutive_failures} 次，必须换用完全不同的方法！"
+                f"\n失败原因及建议：{failure_reason}"
+            )
+        elif failure_reason:
+            failure_hint = f"\n\n上一步失败原因：{failure_reason}"
+        else:
+            failure_hint = ""
 
         # 坐标换算提示：帮助 Vision 模型使用 tap(x,y) 点击 WebView 内的无编号按钮
         if screen_size and img_size and img_size[0] > 0:
