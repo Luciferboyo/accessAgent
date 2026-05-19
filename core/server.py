@@ -276,7 +276,8 @@ class AccessAgentServer:
                             self.store.update(task_id,
                                               status=TaskStatus.FAILED,
                                               error="信息收集步骤多次无法完成",
-                                              completed_at=datetime.now().isoformat())
+                                              completed_at=datetime.now().isoformat(),
+                                              usage=usage.to_dict())
                             break
                         print("[注意] 信息收集任务步骤已完成，但尚未汇报结果，追加汇报步骤")
                         if plan is None:
@@ -326,8 +327,8 @@ class AccessAgentServer:
                 if need_vision:
                     if action.get("action") == "need_screenshot":
                         trigger = "文本信息不足"
-                    elif consecutive_failures >= 1:
-                        trigger = f"上步失败（{failure_reason}）"
+                    elif consecutive_failures >= 2:
+                        trigger = f"连续失败 {consecutive_failures} 次（{failure_reason}）"
                     else:
                         trigger = "界面元素无有效文字"
 
@@ -538,7 +539,8 @@ class AccessAgentServer:
                         self.store.update(task_id,
                                           status=TaskStatus.FAILED,
                                           error=error_msg,
-                                          completed_at=datetime.now().isoformat())
+                                          completed_at=datetime.now().isoformat(),
+                                          usage=usage.to_dict())
                         break
 
                     if consecutive_failures >= config.MAX_RETRIES:
@@ -552,7 +554,8 @@ class AccessAgentServer:
                             self.store.update(task_id,
                                               status=TaskStatus.FAILED,
                                               error=error_msg,
-                                              completed_at=datetime.now().isoformat())
+                                              completed_at=datetime.now().isoformat(),
+                                              usage=usage.to_dict())
                             break
                         print(f"[Planner] 连续失败，第 {replan_count} 次重新规划...")
                         self.store.update(
@@ -723,13 +726,13 @@ Agent 准备汇报的内容：
         }
 
     def _save_report(self, task: str, content: str):
-        import datetime as dt
         os.makedirs("./reports", exist_ok=True)
-        timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        now = datetime.now()
+        timestamp = now.strftime("%Y%m%d_%H%M%S")
         path = f"./reports/report_{timestamp}.txt"
         with open(path, "w", encoding="utf-8") as f:
             f.write(f"任务：{task}\n")
-            f.write(f"时间：{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write("=" * 50 + "\n")
             f.write(content)
         print("\n" + "=" * 50)

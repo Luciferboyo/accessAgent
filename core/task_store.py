@@ -36,11 +36,11 @@ class TaskStore:
         self.tasks: dict[str, TaskRecord] = {}
         self.queue: asyncio.Queue = asyncio.Queue()
 
-    def submit(self, task: str) -> TaskRecord:
+    async def submit(self, task: str) -> TaskRecord:
         task_id = str(uuid.uuid4())[:8]
         record = TaskRecord(task_id=task_id, task=task)
         self.tasks[task_id] = record
-        self.queue.put_nowait(task_id)
+        await self.queue.put(task_id)
         print(f"[TaskStore] 新任务入队 [{task_id}]：{task}")
         return record
 

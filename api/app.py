@@ -65,14 +65,14 @@ def create_app(store: TaskStore) -> FastAPI:
     # ── 路由 ─────────────────────────────────────────────
 
     @app.post("/task", response_model=TaskResponse, summary="提交新任务")
-    def submit_task(req: TaskRequest):
+    async def submit_task(req: TaskRequest):
         """
         提交一个自动化任务。
         任务会进入队列，等待 Android 设备连接后依次执行。
 
         返回 `task_id`，可用于后续查询状态。
         """
-        record = _store.submit(req.task)
+        record = await _store.submit(req.task)
         return to_resp(record)
 
     @app.get("/task/{task_id}", response_model=TaskResponse, summary="查询任务状态")

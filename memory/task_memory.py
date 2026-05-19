@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 from datetime import datetime
 
 
@@ -20,13 +21,24 @@ class TaskMemory:
 
     def _load(self) -> dict:
         if os.path.exists(MEMORY_FILE):
-            with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+            try:
+                with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"[Memory] 记忆文件损坏或读取失败（{e}），已重置为空")
+                return {}
         return {}
 
     def _save(self):
-        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(self.flows, f, ensure_ascii=False, indent=2)
+        """原子写入：先写临时文件，再 os.replace，防止写入中断导致文件损坏"""
+        dir_name = os.path.dirname(os.path.abspath(MEMORY_FILE))
+        try:
+            fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(self.flows, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, MEMORY_FILE)
+        except OSError as e:
+            print(f"[Memory] 记忆文件保存失败（{e}）")
 
     def _extract_keywords(self, task: str) -> list[str]:
         """

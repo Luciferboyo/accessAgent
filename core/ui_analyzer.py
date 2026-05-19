@@ -74,9 +74,6 @@ class UIAnalyzer:
         if len(meaningful) < len(visible) * 0.3:
             return True
 
-        if "uncertain" in last_action_result or "unknown" in last_action_result:
-            return True
-
         return False
 
     def find_element_by_text(self, ui_elements: list[dict], text: str) -> dict | None:

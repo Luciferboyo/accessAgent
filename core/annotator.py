@@ -11,9 +11,21 @@ class ScreenAnnotator:
         img = Image.open(image_path).convert("RGB")
         draw = ImageDraw.Draw(img)
 
-        try:
-            font = ImageFont.truetype("arial.ttf", 24)
-        except Exception:
+        # 按优先级尝试常见字体；全部失败时降级为 PIL 内置默认字体
+        _FONT_CANDIDATES = [
+            "arial.ttf",
+            "/system/fonts/Roboto-Regular.ttf",   # Android
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Linux
+            "C:/Windows/Fonts/arial.ttf",          # Windows 绝对路径
+        ]
+        font = None
+        for _fc in _FONT_CANDIDATES:
+            try:
+                font = ImageFont.truetype(_fc, 24)
+                break
+            except Exception:
+                continue
+        if font is None:
             font = ImageFont.load_default()
 
         for elem in ui_elements:
