@@ -233,9 +233,9 @@ class AccessAgentServer:
         # task_type: "info" | "operation" | "verify"
         task_type = await self._classify_task(task)
 
-        current_state = await self._request_state(websocket)
-
         try:
+            current_state = await self._request_state(websocket)
+
             for global_step in range(config.MAX_STEPS):
                 print(f"\n{'='*50}")
                 print(f"[Step {global_step + 1}] [{task_id}]")
@@ -266,10 +266,22 @@ class AccessAgentServer:
                 if plan is None or step_index >= len(plan):
                     if task_type == "info":
                         # 信息收集类任务走完所有计划步骤，但没有 report，强制补一步
+                        # 防止重复追加：检查最后一步是否已经是汇报步骤
+                        report_step = "将目前收集到的所有信息整理后用 report 汇报给用户，如果信息不完整请说明原因"
+                        if plan and plan[-1] == report_step:
+                            # 汇报步骤已经存在但仍未执行成功，说明执行器无法完成
+                            # 强制结束，避免无限追加
+                            print("[注意] 汇报步骤已追加但仍未完成，强制以当前状态结束任务")
+                            await websocket.send(json.dumps({"type": "finish", "message": "信息收集未能完成，任务结束"}))
+                            self.store.update(task_id,
+                                              status=TaskStatus.FAILED,
+                                              error="信息收集步骤多次无法完成",
+                                              completed_at=datetime.now().isoformat())
+                            break
                         print("[注意] 信息收集任务步骤已完成，但尚未汇报结果，追加汇报步骤")
                         if plan is None:
                             plan = []
-                        plan.append("将目前收集到的所有信息整理后用 report 汇报给用户，如果信息不完整请说明原因")
+                        plan.append(report_step)
                         failure_reason = "所有规划步骤已完成，现在必须用 report 汇报收集到的内容"
                         continue
                     print("[完成] 所有步骤执行完毕")
