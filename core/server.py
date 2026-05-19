@@ -117,10 +117,14 @@ class AccessAgentServer:
         """
         try:
             screenshot_b64 = await self._request_screenshot(websocket)
-            # 保存初始截图（不标注，仅用于描述）
+            # 保存初始截图（不标注，仅用于描述）；放线程池避免阻塞事件循环
             img_path = os.path.join(config.SCREENSHOT_DIR, "init.png")
-            with open(img_path, "wb") as f:
-                f.write(base64.b64decode(screenshot_b64))
+
+            def _write_init(b64_data: str, path: str):
+                with open(path, "wb") as _f:
+                    _f.write(base64.b64decode(b64_data))
+
+            await self._in_thread(_write_init, screenshot_b64, img_path)
 
             prompt = (
                 "请用一句话（不超过80字）描述当前手机屏幕的状态。\n"
@@ -730,10 +734,10 @@ Agent 准备汇报的内容：
         }
 
     def _save_report(self, task: str, content: str):
-        os.makedirs("./reports", exist_ok=True)
+        os.makedirs(config.REPORTS_DIR, exist_ok=True)
         now = datetime.now()
         timestamp = now.strftime("%Y%m%d_%H%M%S")
-        path = f"./reports/report_{timestamp}.txt"
+        path = os.path.join(config.REPORTS_DIR, f"report_{timestamp}.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write(f"任务：{task}\n")
             f.write(f"时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n")

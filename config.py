@@ -38,6 +38,9 @@ class Config:
     # 截图保存目录
     SCREENSHOT_DIR: str = "./screenshots"
 
+    # 任务报告保存目录
+    REPORTS_DIR: str = "./reports"
+
 
 config = Config()
 

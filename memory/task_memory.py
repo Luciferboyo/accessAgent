@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import tempfile
@@ -120,7 +121,8 @@ class TaskMemory:
         hint:
           partial 时必须传入，包含 failed_paths / found_info / suggestion
         """
-        key = task[:40]
+        # SHA-256 前 16 位作为 key，彻底消除首 40 字相同时的碰撞问题
+        key = hashlib.sha256(task.encode("utf-8")).hexdigest()[:16]
         record = {
             "task": task,
             "quality": quality,
