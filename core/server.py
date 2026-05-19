@@ -233,6 +233,8 @@ class AccessAgentServer:
         report_rejected_count = 0  # report 被校验拒绝的次数，超限后强制放行
         verify_failed_count = 0    # verify 任务 finish 未通过次数，超限后强制放行
         force_accepted = False     # 是否为强制放行（用于记忆质量判断）
+        force_vision_next_step = False  # tap 之后强制截图，避免 Text 用错坐标重点
+        stuck_action_counts: dict[str, int] = {}  # 记录每个 (action:index) 累计卡住次数
 
         try:
             # 任务开始时分类一次，后续复用，不重复调用 LLM
@@ -392,12 +394,18 @@ class AccessAgentServer:
                 text_action = action.get("action")
                 if text_action in ("report", "finish", "find_package", "tap"):
                     need_vision = False
+                    _force_by_tap = False
                 else:
+                    _force_by_tap = force_vision_next_step
                     need_vision = (
                         text_action == "need_screenshot"
                         or self.analyzer.needs_screenshot(ui_elements)
                         or consecutive_failures >= 2
+                        or _force_by_tap  # 上一步为 tap，强制截图确认结果
                     )
+                    if _force_by_tap:
+                        print("[Vision] 上一步为 tap 操作，强制截图确认结果")
+                force_vision_next_step = False  # 消费后重置
 
                 vision_usage = None
                 if need_vision:
@@ -405,6 +413,8 @@ class AccessAgentServer:
                         trigger = "文本信息不足"
                     elif consecutive_failures >= 2:
                         trigger = f"连续失败 {consecutive_failures} 次（{failure_reason}）"
+                    elif _force_by_tap:
+                        trigger = "上一步 tap 操作，确认结果"
                     else:
                         trigger = "界面元素无有效文字"
 
@@ -646,6 +656,10 @@ class AccessAgentServer:
                         "next_hint": ""
                     }
                     reflect_usage = TokenUsage()
+                    if act_name == "tap":
+                        # tap 专用于 WebView 内无编号按钮，结果无法从无障碍树读取
+                        # 强制下一步截图确认，避免 Text 模型用错误坐标重复操作
+                        force_vision_next_step = True
                     print(f"[Reflector] 跳过（{act_name} 系统动作），标记为 progress")
                 else:
                     print("[Reflector] 自我反思...")
@@ -720,6 +734,22 @@ class AccessAgentServer:
                         history.append(f"  → 建议改用：{next_hint_stuck}")
                         # failure_reason 追加替代建议，传给 Executor prompt
                         failure_reason = f"{failure_reason}；建议改用：{next_hint_stuck}"
+
+                    # 跨步骤卡死检测：同一 (action, index) 组合累计卡死 2 次以上
+                    # 即使中间有 progress（如 back），也说明该路径根本不可行
+                    stuck_key = f"{act_name}:{action.get('params', {}).get('index', '')}"
+                    stuck_action_counts[stuck_key] = stuck_action_counts.get(stuck_key, 0) + 1
+                    if stuck_action_counts[stuck_key] >= 2:
+                        failure_reason = (
+                            f"⚠️ 操作 [{stuck_key}] 已累计卡死 {stuck_action_counts[stuck_key]} 次"
+                            f"（即使中间有返回操作也无法解决），该坐标/元素路径完全不可行！"
+                            f"原因：{failure_reason}。"
+                            f"必须改用截图重新识别正确目标，或换用完全不同的操作路径。"
+                        )
+                        # 强制下一步截图，让 Vision 重新识别正确目标
+                        force_vision_next_step = True
+                        print(f"[卡死检测] {stuck_key} 累计卡死 {stuck_action_counts[stuck_key]} 次，强制下步截图")
+
                     print(f"[失败] 累计连续失败 {consecutive_failures} 次（总计 {total_failures} 次）")
 
                     if total_failures >= config.MAX_TOTAL_FAILURES:
@@ -777,6 +807,7 @@ class AccessAgentServer:
                         step_index = 0        # 新计划从第 0 步开始
                         consecutive_failures = 0
                         failure_reason = ""
+                        stuck_action_counts.clear()  # 新计划重置卡死计数
 
         except websockets.ConnectionClosed:
             print(f"[WS] 连接断开，任务 [{task_id}] 中止")
