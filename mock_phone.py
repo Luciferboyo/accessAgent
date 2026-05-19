@@ -235,10 +235,18 @@ async def do_home():
     await asyncio.sleep(0.5)
 
 
+async def get_foreground_package() -> str:
+    """获取当前前台应用的包名"""
+    result = await adb_async("shell dumpsys window windows", timeout=10)
+    import re
+    m = re.search(r'mCurrentFocus=Window\{[^\s]+ [^\s]+ ([^/}\s]+)', result)
+    return m.group(1) if m else ""
+
+
 async def do_open_app(package: str):
     print(f"[执行] open_app {package}")
     await adb_async(f"shell monkey -p {package} -c android.intent.category.LAUNCHER 1")
-    await asyncio.sleep(2.0)
+    await asyncio.sleep(3.5)  # 给应用足够的启动时间
 
 
 async def do_search_web(query: str):
@@ -268,11 +276,14 @@ async def handle_session(ws, step_counter: list):
         # 请求当前界面状态
         elif msg_type == "request_state":
             print("[状态] 获取 UI 树...")
-            elements = await get_ui_elements()
-            print(f"[状态] 共 {len(elements)} 个可交互元素")
+            elements, foreground_pkg = await asyncio.gather(
+                get_ui_elements(),
+                get_foreground_package(),
+            )
+            print(f"[状态] 共 {len(elements)} 个可交互元素，前台应用：{foreground_pkg}")
             await ws.send(json.dumps({
                 "type": "state",
-                "package": "",
+                "package": foreground_pkg,
                 "screen_size": [1080, 2340],
                 "ui_elements": elements,
             }))

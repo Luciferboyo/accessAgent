@@ -521,9 +521,23 @@ class AccessAgentServer:
                 )
 
                 # ── 8. 自我反思（系统级动作直接跳过，节省 token）────
-                SKIP_REFLECT = {"back", "home", "open_app", "search_web"}
+                SKIP_REFLECT = {"back", "home", "search_web"}
                 act_name = action.get("action")
-                if act_name in SKIP_REFLECT:
+                if act_name == "open_app":
+                    # open_app 用包名验证：确认前台应用确实切换为目标应用
+                    target_pkg = action.get("params", {}).get("package", "")
+                    actual_pkg = current_state.get("package", "")
+                    if target_pkg and actual_pkg and actual_pkg != target_pkg:
+                        verify = {
+                            "success": False,
+                            "reason": f"open_app 后前台应用是 {actual_pkg}，而非目标 {target_pkg}，应用未能成功切换"
+                        }
+                        print(f"[open_app] 切换失败：目标={target_pkg}，实际={actual_pkg}")
+                    else:
+                        verify = {"success": True, "reason": f"open_app 后前台应用已切换为 {actual_pkg or target_pkg}"}
+                        print(f"[open_app] 切换成功：{actual_pkg or target_pkg}")
+                    reflect_usage = TokenUsage()
+                elif act_name in SKIP_REFLECT:
                     verify = {"success": True, "reason": f"{act_name} 系统动作默认成功"}
                     reflect_usage = TokenUsage()
                     print(f"[Reflector] 跳过（{act_name} 系统动作）")
