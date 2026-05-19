@@ -98,7 +98,7 @@ class AccessAgentServer:
         os.makedirs(config.SCREENSHOT_DIR, exist_ok=True)
 
     @staticmethod
-    async def _in_thread(fn, *args, timeout: int = 90):
+    async def _in_thread(fn, *args, timeout: int = 150):
         """在线程池中执行同步阻塞函数，不阻塞事件循环，超时自动抛出"""
         loop = asyncio.get_running_loop()
         coro = loop.run_in_executor(None, functools.partial(fn, *args))
@@ -244,6 +244,14 @@ class AccessAgentServer:
 
                 current_step = plan[step_index]
                 print(f"[步骤 {step_index + 1}/{len(plan)}] {current_step}")
+
+                # ── 实时进度更新（供外部轮询 /task/{id} 查看）──────
+                self.store.update(
+                    task_id,
+                    progress=f"步骤 {step_index + 1}/{len(plan)}：{current_step[:60]}",
+                    current_step=step_index + 1,
+                    total_steps=len(plan),
+                )
 
                 # ── 3. 优先文本决策 ──────────────────────────────
                 print("[Text] 尝试文本决策...")
@@ -499,6 +507,10 @@ class AccessAgentServer:
                                               completed_at=datetime.now().isoformat())
                             break
                         print(f"[Planner] 连续失败，第 {replan_count} 次重新规划...")
+                        self.store.update(
+                            task_id,
+                            progress=f"重新规划中（第 {replan_count} 次），原因：{failure_reason[:50]}",
+                        )
                         plan, replan_usage = await self._in_thread(
                             self.planner.revise_plan,
                             task, plan, step_index, failure_reason, ui_text_after

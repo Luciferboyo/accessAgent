@@ -3,8 +3,8 @@ import mimetypes
 import os
 from openai import OpenAI
 
-# HTTP 请求超时（秒）：连接 + 读取；比 _in_thread 的 90s 略小，确保 SDK 先超时
-_HTTP_TIMEOUT = 60.0
+# HTTP 请求超时（秒）：连接 + 读取；比 _in_thread 的 150s 略小，确保 SDK 先超时
+_HTTP_TIMEOUT = 120.0
 
 
 class TokenUsage:

@@ -40,6 +40,10 @@ def create_app(store: TaskStore) -> FastAPI:
         created_at: str
         completed_at: Optional[str] = None
         usage: Optional[dict] = None
+        # 实时进度字段（running 状态时有值）
+        progress: Optional[str] = None
+        current_step: Optional[int] = None
+        total_steps: Optional[int] = None
 
     # ── 工具函数 ──────────────────────────────────────────
 
@@ -53,6 +57,9 @@ def create_app(store: TaskStore) -> FastAPI:
             created_at=record.created_at,
             completed_at=record.completed_at,
             usage=record.usage,
+            progress=record.progress,
+            current_step=record.current_step,
+            total_steps=record.total_steps,
         )
 
     # ── 路由 ─────────────────────────────────────────────

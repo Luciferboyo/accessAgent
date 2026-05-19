@@ -23,6 +23,10 @@ class TaskRecord:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     completed_at: Optional[str] = None
     usage: Optional[dict] = None
+    # 实时进度：执行中时更新，供外部轮询查看当前步骤
+    progress: Optional[str] = None
+    current_step: Optional[int] = None
+    total_steps: Optional[int] = None
 
 
 class TaskStore:
