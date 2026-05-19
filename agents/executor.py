@@ -53,10 +53,12 @@ TEXT_SYSTEM = """你是手机自动化执行专家。根据当前界面元素和
 VISION_SYSTEM = """你是手机自动化执行专家。根据截图中的编号元素和当前步骤，决定下一个操作。
 
 可用动作：
-- click(index)：点击编号为 index 的元素
+- click(index)：点击编号为 index 的元素（元素在截图中有彩色方框和编号）
 - long_click(index)：长按编号为 index 的元素
 - type(index, text)：在编号为 index 的输入框输入文字
 - scroll(index, direction)：在元素上滑动，direction 为 up/down/left/right
+- tap(x, y)：直接点击手机屏幕的绝对坐标（手机像素），专用于 WebView/小程序中没有编号的按钮
+  ⚠️ 换算方法：提示中会提供截图尺寸和手机分辨率，将截图中的像素坐标乘以换算比例即可得到手机坐标
 - back()：返回上一页
 - home()：回到主屏幕
 - find_package(keyword)：查询设备上安装的包名（不知道包名时先查询，结果反馈后再用 open_app 打开）
@@ -128,11 +130,27 @@ class Executor:
 
     def decide_vision(self, current_step: str, step_index: int, total_steps: int,
                       annotated_image: str, ui_text: str, history: list[str],
-                      failure_reason: str = "") -> tuple[dict, TokenUsage]:
+                      failure_reason: str = "",
+                      screen_size: list[int] = None,
+                      img_size: tuple[int, int] = None) -> tuple[dict, TokenUsage]:
         history_text = "\n".join(history[-5:]) if history else "无"
         failure_hint = f"\n上一步失败原因：{failure_reason}" if failure_reason else ""
         remaining = total_steps - step_index - 1
         progress = f"第 {step_index + 1} 步 / 共 {total_steps} 步，完成后还剩 {remaining} 步"
+
+        # 坐标换算提示：帮助 Vision 模型使用 tap(x,y) 点击 WebView 内的无编号按钮
+        if screen_size and img_size and img_size[0] > 0:
+            scale_x = screen_size[0] / img_size[0]
+            scale_y = screen_size[1] / img_size[1]
+            coord_hint = (
+                f"\n【坐标参考】截图尺寸 {img_size[0]}×{img_size[1]}px，"
+                f"手机分辨率 {screen_size[0]}×{screen_size[1]}px，"
+                f"换算比例 ×{scale_x:.2f}（x）×{scale_y:.2f}（y）。"
+                f"若目标按钮在截图中没有编号（WebView/小程序内容），"
+                f"请用 tap(x,y)：手机x = 截图x×{scale_x:.2f}，手机y = 截图y×{scale_y:.2f}"
+            )
+        else:
+            coord_hint = ""
 
         prompt = f"""当前步骤（{progress}）：{current_step}
 
@@ -140,9 +158,11 @@ class Executor:
 {ui_text}
 
 最近操作历史：
-{history_text}{failure_hint}
+{history_text}{failure_hint}{coord_hint}
 
 请根据截图决定下一个操作。
+- 如果目标按钮有编号，使用 click(index)
+- 如果目标按钮没有编号（WebView/小程序中），使用 tap(x,y) 并按上方换算比例计算坐标
 如果已经收集到目标信息，请使用 report 动作汇报内容。
 注意：还剩 {remaining} 步未执行，除非整个任务已提前完成，否则不要调用 finish。"""
 

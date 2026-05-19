@@ -314,7 +314,7 @@ class AccessAgentServer:
                 # ── 4. 判断是否需要截图 ──────────────────────────
                 # 文本模型已决定 report/finish/find_package 时，不触发 Vision（避免被覆盖）
                 text_action = action.get("action")
-                if text_action in ("report", "finish", "find_package"):
+                if text_action in ("report", "finish", "find_package", "tap"):
                     need_vision = False
                 else:
                     need_vision = (
@@ -339,15 +339,21 @@ class AccessAgentServer:
                         self.annotator.save_screenshot,
                         screenshot_b64, config.SCREENSHOT_DIR, global_step
                     )
+                    screen_size = current_state.get("screen_size", [1080, 2340])
                     annotated = await self._in_thread(
                         self.annotator.annotate,
                         img_path, ui_elements,
-                        img_path.replace(".png", "_labeled.png")
+                        img_path.replace(".png", "_labeled.png"),
+                        screen_size
                     )
                     print(f"[Vision] 标注截图：{annotated}")
+                    # 计算截图尺寸（mock_phone 压缩至 max_width=720）
+                    _scale = 720 / screen_size[0] if screen_size[0] > 0 else 1.0
+                    img_size = (720, int(screen_size[1] * _scale))
                     action, vision_usage = await self._in_thread(
                         self.executor.decide_vision,
-                        current_step, step_index, len(plan), annotated, ui_text, history, failure_reason
+                        current_step, step_index, len(plan), annotated, ui_text, history,
+                        failure_reason, screen_size, img_size
                     )
                     usage.add_vision(vision_usage)
                     print(f"[Vision] {action.get('action')} | {action.get('reason')}")
@@ -846,6 +852,10 @@ Agent 准备汇报的内容：
             x, y = self.analyzer.get_center(elem)
             return {"type": "scroll", "x": x, "y": y,
                     "direction": params.get("direction", "up")}
+
+        if act == "tap":
+            # 直接坐标点击，用于 WebView/小程序中不在无障碍树里的按钮
+            return {"type": "click", "x": int(params.get("x", 0)), "y": int(params.get("y", 0))}
 
         if act == "find_package":
             return {"type": "find_package", "keyword": params.get("keyword", "")}
