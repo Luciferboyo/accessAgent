@@ -4,6 +4,7 @@ import os
 import tempfile
 from datetime import datetime
 
+from config import config
 
 MEMORY_FILE = "./memory/task_flows.json"
 
@@ -75,15 +76,28 @@ class TaskMemory:
             return 0.0
         return len(kw1 & kw2) / len(kw1 | kw2)
 
-    def find_similar(self, task: str, threshold: float = 0.85) -> dict | None:
+    def find_similar(self,
+                     task: str,
+                     full_threshold: float | None = None,
+                     partial_threshold: float | None = None) -> dict | None:
         """
         查找相似任务的历史记录。
 
+        阈值说明（均从 config 读取默认值）：
+        - full_threshold    相似度 >= 此值且原记录为 full → 直接复用计划步骤（极高置信度）
+        - partial_threshold 相似度 >= 此值但 < full_threshold → 仅提供经验提示，不复用计划
+                            原为 full 质量的记录会被降级为 partial hint（包含步骤摘要建议）
+
         返回值：
-        - None：未找到相似任务
-        - {"quality": "full",    "steps": [...]}        完全成功，直接复用计划
-        - {"quality": "partial", "hint":  {...}}        部分成功，作为经验提示
+        - None：未找到足够相似的任务
+        - {"quality": "full",    "steps": [...]}   直接复用计划
+        - {"quality": "partial", "hint":  {...}}   仅作为经验提示
         """
+        if full_threshold is None:
+            full_threshold = config.MEMORY_FULL_THRESHOLD
+        if partial_threshold is None:
+            partial_threshold = config.MEMORY_PARTIAL_THRESHOLD
+
         best_score = 0.0
         best_data = None
         best_key = None
@@ -95,20 +109,40 @@ class TaskMemory:
                 best_data = data
                 best_key = key
 
-        if best_score < threshold or best_data is None:
+        if best_score < partial_threshold or best_data is None:
             print(f"[Memory] 未找到相似任务（最高相似度 {best_score:.0%}），重新规划")
             return None
 
         quality = best_data.get("quality", "full")
-        label = "完全成功" if quality == "full" else "部分成功"
-        print(f"[Memory] 找到相似任务（相似度 {best_score:.0%}，{label}）：{best_key}")
 
-        if quality == "full":
+        # ── 高置信度：直接复用计划 ──────────────────────────────────
+        if best_score >= full_threshold and quality == "full":
             steps = best_data.get("steps", [])
-            return {"quality": "full", "steps": steps} if steps else None
+            if not steps:
+                return None
+            print(f"[Memory] 找到相似任务（相似度 {best_score:.0%}，完全成功）：{best_key}")
+            return {"quality": "full", "steps": steps}
 
-        # partial：返回经验提示，不复用计划
-        return {"quality": "partial", "hint": best_data.get("hint", {})}
+        # ── 中等置信度：降级为经验提示，不复用计划 ─────────────────
+        # 原因：相似度未达 full_threshold，参数（用户名/金额/内容等）可能不同，
+        # 直接复用计划风险较高，仅提取经验作为 Planner 参考。
+        orig_label = "完全成功" if quality == "full" else "部分成功"
+        print(f"[Memory] 找到相似任务（相似度 {best_score:.0%}，{orig_label}，"
+              f"相似度未达 {full_threshold:.0%}，降级为经验提示）：{best_key}")
+
+        hint = best_data.get("hint", {})
+        if not hint and quality == "full":
+            # 原 full 记录没有 hint 字段，从步骤列表提取摘要作为建议
+            steps = best_data.get("steps", [])
+            hint = {
+                "suggestion": (
+                    f"类似历史任务的参考步骤（仅供参考，请根据当前任务调整）："
+                    f"{' → '.join(steps[:4])}"
+                ),
+                "failed_paths": [],
+                "found_info": "",
+            }
+        return {"quality": "partial", "hint": hint}
 
     def save_flow(self, task: str, steps: list[str], actions: list[dict],
                   quality: str = "full", hint: dict = None):

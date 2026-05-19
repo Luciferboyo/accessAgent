@@ -471,12 +471,20 @@ class AccessAgentServer:
                     break
 
                 if action.get("action") == "report":
-                    # 纯操作任务不应以 report 结束，引导改为 finish
-                    if task_type == "operation":
-                        print("[拦截] 纯操作任务不应使用 report，引导改用 finish")
+                    # operation / verify 类任务不应以 report 结束，引导改为 finish
+                    # verify 任务必须在界面上看到成功标志后才能 finish，
+                    # 用 report 说明"任务失败"会被误判为成功并污染记忆库
+                    if task_type in ("operation", "verify"):
+                        type_label = "纯操作" if task_type == "operation" else "操作+验证"
+                        print(f"[拦截] {type_label}任务不应使用 report，引导改用 finish")
                         failure_reason = (
-                            "这是一个纯操作任务，目标是完成操作而非收集信息。"
-                            "请不要使用 report，确认操作已完成后直接调用 finish。"
+                            f"这是一个{type_label}类任务，目标是完成操作"
+                            + ("" if task_type == "operation" else "并在界面上确认成功")
+                            + "，而非收集信息。"
+                            "请不要使用 report。"
+                            + ("确认操作已完成后直接调用 finish。"
+                               if task_type == "operation"
+                               else "继续操作直到界面出现成功标志，然后调用 finish。")
                         )
                         consecutive_failures += 1
                         current_state = await self._request_state(websocket)

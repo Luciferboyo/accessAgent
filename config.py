@@ -35,6 +35,12 @@ class Config:
     MAX_TOTAL_FAILURES: int = 10 # 累计失败上限，超过直接放弃
     MAX_REPLANS: int = 3         # 最多重新规划次数，超过直接放弃
 
+    # 记忆匹配阈值
+    # MEMORY_FULL_THRESHOLD：相似度 >= 此值才复用计划步骤（极高置信度）
+    # MEMORY_PARTIAL_THRESHOLD：相似度 >= 此值但 < FULL 时，仅提供经验提示，不复用计划
+    MEMORY_FULL_THRESHOLD: float = 0.99
+    MEMORY_PARTIAL_THRESHOLD: float = 0.85
+
     # 截图保存目录
     SCREENSHOT_DIR: str = "./screenshots"
 
