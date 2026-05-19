@@ -108,7 +108,8 @@ class Executor:
     def decide_text(self, current_step: str, step_index: int, total_steps: int,
                     ui_text: str, history: list[str],
                     failure_reason: str = "",
-                    consecutive_failures: int = 0) -> tuple[dict, TokenUsage]:
+                    consecutive_failures: int = 0,
+                    task_type: str = "operation") -> tuple[dict, TokenUsage]:
         history_text = "\n".join(history[-8:]) if history else "无"
         remaining = total_steps - step_index - 1
         progress = f"第 {step_index + 1} 步 / 共 {total_steps} 步，完成后还剩 {remaining} 步"
@@ -123,16 +124,20 @@ class Executor:
         else:
             failure_hint = ""
 
+        if task_type in ("operation", "verify"):
+            task_type_hint = "\n\n🚫 本任务是操作类任务，严禁使用 report——report 只用于信息收集任务。请直接完成操作后调用 finish。"
+        else:
+            task_type_hint = ""
+
         prompt = f"""当前步骤（{progress}）：{current_step}
 
 界面元素：
 {ui_text}
 
 最近操作历史：
-{history_text}{failure_hint}
+{history_text}{failure_hint}{task_type_hint}
 
 请决定下一个操作。如果界面元素信息不足以判断，请返回 need_screenshot。
-如果已经收集到目标信息，请使用 report 动作汇报内容。
 注意：还剩 {remaining} 步未执行，除非整个任务已提前完成，否则不要调用 finish。"""
 
         rsp, usage = self.text_llm.predict(prompt, system=TEXT_SYSTEM)
@@ -143,7 +148,8 @@ class Executor:
                       failure_reason: str = "",
                       screen_size: list[int] = None,
                       img_size: tuple[int, int] = None,
-                      consecutive_failures: int = 0) -> tuple[dict, TokenUsage]:
+                      consecutive_failures: int = 0,
+                      task_type: str = "operation") -> tuple[dict, TokenUsage]:
         history_text = "\n".join(history[-8:]) if history else "无"
         remaining = total_steps - step_index - 1
         progress = f"第 {step_index + 1} 步 / 共 {total_steps} 步，完成后还剩 {remaining} 步"
@@ -157,6 +163,11 @@ class Executor:
             failure_hint = f"\n\n上一步失败原因：{failure_reason}"
         else:
             failure_hint = ""
+
+        if task_type in ("operation", "verify"):
+            task_type_hint = "\n\n🚫 本任务是操作类任务，严禁使用 report——report 只用于信息收集任务。请直接完成操作后调用 finish。"
+        else:
+            task_type_hint = ""
 
         # 坐标换算提示：帮助 Vision 模型使用 tap(x,y) 点击 WebView 内的无编号按钮
         if screen_size and img_size and img_size[0] > 0:
@@ -178,12 +189,11 @@ class Executor:
 {ui_text}
 
 最近操作历史：
-{history_text}{failure_hint}{coord_hint}
+{history_text}{failure_hint}{task_type_hint}{coord_hint}
 
 请根据截图决定下一个操作。
 - 如果目标按钮有编号，使用 click(index)
 - 如果目标按钮没有编号（WebView/小程序中），使用 tap(x,y) 并按上方换算比例计算坐标
-如果已经收集到目标信息，请使用 report 动作汇报内容。
 注意：还剩 {remaining} 步未执行，除非整个任务已提前完成，否则不要调用 finish。"""
 
         rsp, usage = self.vision_llm.predict(prompt, annotated_image, system=VISION_SYSTEM)

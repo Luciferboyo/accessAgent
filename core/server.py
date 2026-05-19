@@ -297,6 +297,7 @@ class AccessAgentServer:
 
             # ────────────────────────────────────────────────────────
             current_state = await self._request_state(websocket)
+            consecutive_scroll_no_change = 0   # 连续 scroll 无变化次数
 
             for global_step in range(max_steps):
                 print(f"\n{'='*50}")
@@ -380,7 +381,7 @@ class AccessAgentServer:
                 print("[Text] 尝试文本决策...")
                 action, text_usage = await self._in_thread(
                     self.executor.decide_text, current_step, step_index, len(plan),
-                    ui_text, history, failure_reason, consecutive_failures
+                    ui_text, history, failure_reason, consecutive_failures, task_type
                 )
                 usage.add_text(text_usage)
                 print(f"[Text] {action.get('action')} | {action.get('reason')}")
@@ -428,7 +429,7 @@ class AccessAgentServer:
                     action, vision_usage = await self._in_thread(
                         self.executor.decide_vision,
                         current_step, step_index, len(plan), annotated, ui_text, history,
-                        failure_reason, screen_size, img_size, consecutive_failures
+                        failure_reason, screen_size, img_size, consecutive_failures, task_type
                     )
                     usage.add_vision(vision_usage)
                     print(f"[Vision] {action.get('action')} | {action.get('reason')}")
@@ -501,7 +502,8 @@ class AccessAgentServer:
                                if task_type == "operation"
                                else "继续操作直到界面出现成功标志，然后调用 finish。")
                         )
-                        consecutive_failures += 1
+                        # 直接拉到 2，确保下一步立即触发 🚨 强警告，不被 progress 衰减稀释
+                        consecutive_failures = max(consecutive_failures + 1, 2)
                         current_state = await self._request_state(websocket)
                         continue
 
@@ -666,6 +668,26 @@ class AccessAgentServer:
                 if reflect_status is None:
                     # 兼容旧格式 success: true/false
                     reflect_status = "done" if verify.get("success") else "stuck"
+
+                # scroll 连续无变化检测：到达边界后继续 scroll 无意义，强制转 stuck
+                if (act_name == "scroll"
+                        and reflect_status == "progress"
+                        and "无变化" in verify.get("reason", "")):
+                    consecutive_scroll_no_change += 1
+                    if consecutive_scroll_no_change >= 2:
+                        reflect_status = "stuck"
+                        verify["status"] = "stuck"
+                        verify["reason"] = (
+                            f"连续 {consecutive_scroll_no_change} 次 scroll 界面无变化，"
+                            "列表已到边界，继续 scroll 无效"
+                        )
+                        verify["next_hint"] = (
+                            "列表已到边界，请直接对当前可见内容执行操作"
+                            "（如长按图片消息、点击目标元素），不要继续 scroll"
+                        )
+                        print(f"[Scroll] 连续 {consecutive_scroll_no_change} 次无变化，强制转 stuck")
+                else:
+                    consecutive_scroll_no_change = 0
 
                 status_label = {
                     "done": "完成", "progress": "进行中", "stuck": "失败"
