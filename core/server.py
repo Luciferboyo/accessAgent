@@ -130,7 +130,7 @@ class AccessAgentServer:
                 "示例：Android 主屏幕，显示应用图标，当前无任何应用打开。\n"
                 "示例：微信聊天列表页，显示多个联系人的最近消息。"
             )
-            rsp, usage = self.vision_llm.predict(prompt, img_path)
+            rsp, usage = await self._in_thread(self.vision_llm.predict, prompt, img_path)
             desc = rsp.strip()
             print(f"[定向] 当前页面：{desc}")
             return desc, usage
@@ -229,11 +229,12 @@ class AccessAgentServer:
         verify_failed_count = 0    # verify 任务 finish 未通过次数，超限后强制放行
         force_accepted = False     # 是否为强制放行（用于记忆质量判断）
 
-        # 任务开始时分类一次，后续复用，不重复调用 LLM
-        # task_type: "info" | "operation" | "verify"
-        task_type = await self._classify_task(task)
-
         try:
+            # 任务开始时分类一次，后续复用，不重复调用 LLM
+            # task_type: "info" | "operation" | "verify"
+            # 放在 try 内：若分类期间连接断开，finally 可正确标记任务失败
+            task_type = await self._classify_task(task)
+
             current_state = await self._request_state(websocket)
 
             for global_step in range(config.MAX_STEPS):
@@ -577,7 +578,8 @@ class AccessAgentServer:
             self.store.update(task_id,
                               status=TaskStatus.FAILED,
                               error="WebSocket 连接断开",
-                              completed_at=datetime.now().isoformat())
+                              completed_at=datetime.now().isoformat(),
+                              usage=usage.to_dict())
         except Exception as e:
             print(f"[错误] {e}")
             self.store.update(task_id,
@@ -808,4 +810,6 @@ Agent 准备汇报的内容：
         if act == "search_web":
             return {"type": "search_web", "query": params.get("query", "")}
 
-        return {"type": act}
+        # 未知动作类型（LLM 幻觉）：拒绝执行，返回 None 触发重试，而非盲目转发给手机
+        print(f"[警告] _build_command 遇到未知动作类型 '{act}'，跳过")
+        return None
