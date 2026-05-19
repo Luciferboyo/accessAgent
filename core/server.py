@@ -117,20 +117,16 @@ class AccessAgentServer:
         """
         try:
             screenshot_b64 = await self._request_screenshot(websocket)
-            # 保存初始截图（不标注，仅用于描述）；放线程池避免阻塞事件循环
+            # 保存初始截图（不标注，仅用于描述）
             img_path = os.path.join(config.SCREENSHOT_DIR, "init.png")
-
-            def _write_init(b64_data: str, path: str):
-                with open(path, "wb") as _f:
-                    _f.write(base64.b64decode(b64_data))
-
-            await self._in_thread(_write_init, screenshot_b64, img_path)
+            with open(img_path, "wb") as f:
+                f.write(base64.b64decode(screenshot_b64))
 
             prompt = (
                 "请用一句话（不超过80字）描述当前手机屏幕的状态。\n"
                 "包含：① 所在的应用或页面类型  ② 页面的主要内容或当前 URL\n"
                 "直接输出描述，不加任何前缀或解释。\n"
-                "示例：Chrome浏览器显示 Google 搜索结果页，已搜索"骑士比赛"，顶部有比赛分数卡片。\n"
+                "示例：Chrome浏览器显示 Google 搜索结果页，已搜索'骑士比赛'，顶部有比赛分数卡片。\n"
                 "示例：Android 主屏幕，显示应用图标，当前无任何应用打开。\n"
                 "示例：微信聊天列表页，显示多个联系人的最近消息。"
             )
