@@ -611,9 +611,19 @@ class AccessAgentServer:
                             task_id,
                             progress=f"重新规划中（第 {replan_count} 次），原因：{failure_reason[:50]}",
                         )
+
+                        # 重规划前：拍截图了解当前页面位置，避免规划出已在当前位置之前的步骤
+                        print("[重规划] 截图分析当前页面状态...")
+                        screen_desc_replan, desc_usage2 = await self._describe_screen(websocket)
+                        usage.add_vision(desc_usage2)
+
+                        # 从 history 中提取已尝试过的关键路径，告知 Planner 避免重复
+                        tried_approaches = self._summarize_tried_approaches(history)
+
                         plan, replan_usage = await self._in_thread(
                             self.planner.revise_plan,
-                            task, plan, step_index, failure_reason, ui_text_after
+                            task, plan, step_index, failure_reason, ui_text_after,
+                            tried_approaches, screen_desc_replan
                         )
                         usage.add_text(replan_usage)
                         print(f"[Token] 重规划用量：{replan_usage}")
@@ -780,6 +790,19 @@ Agent 准备汇报的内容：
             "found_info": (final_result or "")[:300] if final_result else "未找到有效信息",
             "suggestion": suggestion,
         }
+
+    def _summarize_tried_approaches(self, history: list[str]) -> str:
+        """
+        从 history 中提炼已尝试过的关键操作路径（搜索词、点击目标等），
+        格式化为文字供 Planner 在重规划时避开。
+        """
+        if not history:
+            return ""
+        # history 格式：["步骤N：xxx -> action -> 成功/失败", ...]
+        lines = []
+        for entry in history[-12:]:   # 最多回看12步
+            lines.append(f"  - {entry}")
+        return "\n".join(lines)
 
     def _save_report(self, task: str, content: str):
         os.makedirs(config.REPORTS_DIR, exist_ok=True)
