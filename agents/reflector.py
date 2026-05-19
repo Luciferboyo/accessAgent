@@ -2,37 +2,37 @@ import json
 from models.llm import TextLLM, TokenUsage
 from utils import extract_json
 
-SYSTEM = """你是手机自动化验证专家。根据操作前后的界面变化，判断该步骤是否成功完成。
+SYSTEM = """你是手机自动化验证专家。当前任务使用里程碑式步骤规划（每个步骤描述一个目标状态，通常需要多次操作才能完全达成）。
 
-不同动作的判断标准：
-- click / long_click / type：界面应出现预期变化（新页面、弹窗、内容更新等）
-- scroll：界面内容发生滚动变化即为成功，无需到达特定位置
-- back / home：界面切换到上一页或桌面即为成功
-- open_app / search_web：出现对应应用或搜索页面即为成功
+你的职责：判断【刚才这一次操作】对当前里程碑步骤的推进效果，返回三种状态之一。
 
-⚠️ 最重要的判断原则：评估【目标状态是否达成】，而非【是否使用了指定方法】
-- 步骤描述中可能指定了某种方法（如"使用 search_web 搜索"、"点击地址栏"），
-  但只要操作后界面已到达步骤目标所描述的状态，无论路径如何，都应返回 success=true
-- 示例：步骤"使用 search_web 搜索骑士数据" → 实际通过点击标签页进入了骑士比赛数据页面
-  → 已到达"获取骑士数据"的目标状态 → success=true（不要因为没用 search_web 就判失败）
-- 示例：步骤"搜索关键词进入结果页" → 实际已直接进入了相关数据统计页面
-  → 跳过了搜索步骤直接到达了更靠后的目标 → success=true
+✅ done（里程碑完成）
+- 当前步骤所描述的目标状态已在界面上完全体现
+- 步骤中所有要求的条件均已满足
+- 可以进入下一个步骤了
 
-⚠️ 关键规则：步骤目标必须【完全达成】才能返回 success=true
-- 如果步骤描述包含"所有"、"全部"、"逐一"、"每一个"等词，
-  表示这一步需要多次操作才能完成，单次操作只是部分完成，应返回 success=false
-  例：步骤"关闭所有非目标标签页"，只关了 1 个而还有其他非目标标签页未关 → success=false
-- 如果步骤描述包含"确认"、"验证"字样，必须在界面上看到明确的成功标志才能返回 success=true
-- success=true 表示本步骤目标已【完全】达成，可以进入下一步
-- success=false 表示本步骤还需要继续操作（部分完成也算 false）
+🔄 progress（有效推进，尚未完成）
+- 这次操作让我们明显向步骤目标方向前进了一步
+- 但步骤的完整目标状态还未达成，还需要继续操作
+- 典型情形：
+  ✓ 目标"进入聊天并找到图片消息" → 操作后成功进入了聊天界面（还需滚动找图片）→ progress
+  ✓ 目标"完成打卡" → 成功打开了考勤页面（还需点击打卡按钮）→ progress
+  ✓ 目标"转发图片" → 长按图片后弹出了操作菜单（还需点击转发并选接收方）→ progress
+  ✓ 目标"搜索并查看数据" → 搜索结果页已出现（还需点进去看详情）→ progress
 
-注意：
-- 界面无变化 + 操作是 scroll，可能只是到底了，仍可视为成功
-- 界面无变化 + 操作是 click，通常表示失败
-- 不要因为没有获取到最终目标信息就判断失败，只要操作本身推进了进度就算成功
+❌ stuck（无效/卡住）
+- 操作后 UI 几乎没有变化（非 scroll 操作）
+- 操作后进入了与步骤目标无关的页面（走错方向）
+- 操作后退回到了更早的状态（倒退）
+- 在错误的应用/页面内做了操作（目标是 A 应用，却在 B 应用里操作）
 
-输出 JSON 格式（只输出 JSON，不要其他内容）：
-{"success": true/false, "reason": "判断原因（若步骤目标未完全达成，说明还差什么）", "progress": "任务进展描述"}"""
+判断要点：
+1. 只看"结果状态"是否在推进目标，不要拘泥于步骤中指定的"方法"
+2. 如果当前界面已跳过当前步骤直接到达了更靠后的目标状态 → done
+3. 部分完成 → progress；完全没动或走错 → stuck
+
+输出 JSON（只输出 JSON，不要其他内容）：
+{"status": "done/progress/stuck", "reason": "一句话说明判断原因", "next_hint": "（progress 时）执行器下一步应做什么"}"""
 
 
 class Reflector:
@@ -45,14 +45,31 @@ class Reflector:
         action_type = action_taken.get("action", "")
         ui_changed = ui_before.strip() != ui_after.strip()
 
-        # scroll 且界面无变化：可能已到底，仍算成功
-        if action_type == "scroll" and not ui_changed:
-            return (
-                {"success": True, "reason": "scroll 后界面无变化，可能已到底/顶", "progress": "继续"},
-                TokenUsage()
-            )
+        # scroll 特殊处理：不调用 LLM（节省 token）
+        # 里程碑模式下，scroll 本身极少能"完成"一个步骤，统一返回 progress
+        # - scroll + 无变化 → 已到列表边界，需截图确认内容
+        # - scroll + 有变化 → 内容更新，继续推进
+        if action_type == "scroll":
+            if not ui_changed:
+                return (
+                    {
+                        "status": "progress",
+                        "reason": "scroll 后界面无变化，已到列表底部/顶部",
+                        "next_hint": "已到达列表边界，可截图确认当前可见内容是否满足步骤目标"
+                    },
+                    TokenUsage()
+                )
+            else:
+                return (
+                    {
+                        "status": "progress",
+                        "reason": "scroll 后内容已更新，继续推进步骤",
+                        "next_hint": ""
+                    },
+                    TokenUsage()
+                )
 
-        prompt = f"""当前步骤：{current_step}
+        prompt = f"""当前里程碑步骤：{current_step}
 执行的操作：{json.dumps(action_taken, ensure_ascii=False)}
 界面是否发生变化：{"是" if ui_changed else "否"}
 
@@ -62,22 +79,19 @@ class Reflector:
 操作后界面：
 {ui_after}
 
-请判断该操作后本步骤目标是否达成。
-
-判断要点：
-1. 核心问题：操作后的界面状态，是否达到了步骤描述的目标？
-2. 不要拘泥于步骤指定的"方法"（如 search_web、点击地址栏），只看"结果状态"
-3. 如果当前界面已经到达了比当前步骤更靠后的目标状态（提前完成），也返回 success=true
-4. 如果步骤要求"关闭所有/全部/逐一"等，判断操作后是否还存在未完成的目标
-5. 【重要】如果步骤目标涉及某个特定应用（如 Lark、微信、Chrome），
-   必须确认操作后界面确实是该目标应用的界面，而非其他无关应用的界面。
-   在错误的应用内完成操作不算成功（例如：在 A 应用的搜索框输入内容，
-   不等于"在 B 应用搜索框输入"的目标已达成）"""
+请判断该操作对当前里程碑步骤的推进效果（done/progress/stuck）。"""
 
         rsp, usage = self.llm.predict(prompt, system=SYSTEM)
 
         try:
             data = extract_json(rsp)
+            # 兼容旧格式（success: true/false）
+            if "status" not in data and "success" in data:
+                data["status"] = "done" if data["success"] else "stuck"
+            if "status" not in data:
+                data["status"] = "stuck"
+            if "next_hint" not in data:
+                data["next_hint"] = ""
             return data, usage
         except Exception:
-            return {"success": False, "reason": "验证解析失败", "progress": "未知"}, usage
+            return {"status": "stuck", "reason": "验证解析失败", "next_hint": ""}, usage

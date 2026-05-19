@@ -60,6 +60,9 @@ class TaskAnalyzer:
   "search_hint": ""
 }}"""
 
+        # Bug fix: 预先初始化 usage，确保 LLM 调用成功但 JSON 解析失败时
+        # 仍能返回真实的 token 用量，而不是归零的 TokenUsage()
+        usage = TokenUsage()
         try:
             rsp, usage = self.llm.predict(prompt, system=SYSTEM)
             data = extract_json(rsp)
@@ -83,4 +86,4 @@ class TaskAnalyzer:
                 "valid": True, "issue": "",
                 "can_answer_directly": False, "direct_answer": "",
                 "hypothesis": "", "search_hint": "",
-            }, TokenUsage()
+            }, usage  # 返回真实用量（若 LLM 调用成功但 JSON 解析失败）

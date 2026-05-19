@@ -110,16 +110,17 @@ class AccessAgentServer:
         except asyncio.TimeoutError:
             raise RuntimeError(f"LLM 调用超时（>{timeout}s），请检查网络或 API 状态")
 
-    async def _describe_screen(self, websocket) -> tuple[str, TokenUsage]:
+    async def _describe_screen(self, websocket, label: str = "init") -> tuple[str, TokenUsage]:
         """
-        任务开始前，用 Vision 模型对当前屏幕做一句话定向描述。
+        用 Vision 模型对当前屏幕做一句话定向描述。
         让 Planner 了解起始位置，避免规划冗余的导航步骤。
+        label 用于区分保存文件名（"init" 表示任务开始，"replan_N" 表示第N次重规划前）。
         失败时静默降级，不影响主流程。
         """
         try:
             screenshot_b64 = await self._request_screenshot(websocket)
-            # 保存初始截图（不标注，仅用于描述）
-            img_path = os.path.join(config.SCREENSHOT_DIR, "init.png")
+            # 保存截图（不标注，仅用于描述），文件名带 label 以防重规划时覆盖初始截图
+            img_path = os.path.join(config.SCREENSHOT_DIR, f"{label}.png")
             with open(img_path, "wb") as f:
                 f.write(base64.b64decode(screenshot_b64))
 
@@ -146,9 +147,9 @@ class AccessAgentServer:
                                     ping_interval=None):
             await asyncio.Future()
 
-    async def _classify_task(self, task: str) -> str:
+    async def _classify_task(self, task: str) -> tuple[str, TokenUsage]:
         """
-        用 LLM 判断任务类型，返回以下三种之一：
+        用 LLM 判断任务类型，返回 (task_type, usage)：
         - "info"      信息收集类：目标是让用户获得某些信息，必须用 report 结束
         - "operation" 纯操作类：完成动作即可，用 finish 结束（打开应用、调整设置等）
         - "verify"    操作+验证类：完成操作后需确认结果成功，再用 finish 结束
@@ -172,18 +173,19 @@ class AccessAgentServer:
 
 只输出 JSON：{{"task_type": "info/operation/verify", "reason": "一句话说明判断依据"}}"""
 
+        classify_usage = TokenUsage()
         try:
-            rsp, _ = await self._in_thread(self.text_llm.predict, prompt)
+            rsp, classify_usage = await self._in_thread(self.text_llm.predict, prompt)
             data = extract_json(rsp)
             task_type = data.get("task_type", "operation")
             if task_type not in ("info", "operation", "verify"):
                 task_type = "operation"
             label = {"info": "信息收集类", "operation": "纯操作类", "verify": "操作+验证类"}
             print(f"[任务分类] {label[task_type]} | {data.get('reason', '')}")
-            return task_type
+            return task_type, classify_usage
         except Exception as e:
             print(f"[任务分类] 解析失败（{e}），默认为 operation")
-            return "operation"
+            return "operation", classify_usage
 
     async def handle(self, websocket):
         print("[WS] Android App 已连接，等待任务...")
@@ -234,11 +236,11 @@ class AccessAgentServer:
             # 任务开始时分类一次，后续复用，不重复调用 LLM
             # task_type: "info" | "operation" | "verify"
             # 放在 try 内：若分类期间连接断开，finally 可正确标记任务失败
-            task_type = await self._classify_task(task)
+            task_type, classify_usage = await self._classify_task(task)
+            usage.add_text(classify_usage)
 
             # ── 前置分析：前提验证 + 知识预判 ───────────────────────
-            from datetime import date as _date
-            today_str = _date.today().strftime("%Y-%m-%d")
+            today_str = datetime.now().strftime("%Y-%m-%d")
             print("[TaskAnalyzer] 分析任务前提与知识预判...")
             analysis, analysis_usage = await self._in_thread(
                 self.task_analyzer.analyze, task, task_type, today_str
@@ -435,7 +437,8 @@ class AccessAgentServer:
                             force_accepted = True
                         else:
                             print("[验证] 检查操作是否成功...")
-                            verified, verify_reason = await self._verify_operation(task, ui_text)
+                            verified, verify_reason, verify_op_usage = await self._verify_operation(task, ui_text)
+                            usage.add_text(verify_op_usage)
 
                         if not verified:
                             verify_failed_count += 1
@@ -489,7 +492,8 @@ class AccessAgentServer:
                         force_accepted = True
                     else:
                         # 校验 report 内容是否真正回答了任务
-                        valid, missing = await self._validate_report(task, content)
+                        valid, missing, validate_usage = await self._validate_report(task, content)
+                        usage.add_text(validate_usage)
 
                     if not valid:
                         report_rejected_count += 1
@@ -562,6 +566,7 @@ class AccessAgentServer:
                             f"步骤{step_index + 1}：find_package({keyword}) → {pkg_str}"
                         )
                         print(f"[find_package] 找到包名：{pkg_str}")
+                        consecutive_failures = 0  # 包名查询成功，不算失败
                     else:
                         failure_reason = (
                             f"find_package 未找到关键词 '{keyword}' 对应的已安装应用，"
@@ -571,6 +576,8 @@ class AccessAgentServer:
                             f"步骤{step_index + 1}：find_package({keyword}) → 未找到匹配包名"
                         )
                         print(f"[find_package] 未找到匹配包名")
+                        consecutive_failures += 1
+                        total_failures += 1
                     current_state = await self._request_state(websocket)
                     continue  # 不走 Reflector，直接让 Executor 用包名信息重新决策
 
@@ -594,16 +601,21 @@ class AccessAgentServer:
                     actual_pkg = current_state.get("package", "")
                     if target_pkg and actual_pkg and actual_pkg != target_pkg:
                         verify = {
-                            "success": False,
-                            "reason": f"open_app 后前台应用是 {actual_pkg}，而非目标 {target_pkg}，应用未能成功切换"
+                            "status": "stuck",
+                            "reason": f"open_app 后前台应用是 {actual_pkg}，而非目标 {target_pkg}，应用未能成功切换",
+                            "next_hint": ""
                         }
                         print(f"[open_app] 切换失败：目标={target_pkg}，实际={actual_pkg}")
                     else:
-                        verify = {"success": True, "reason": f"open_app 后前台应用已切换为 {actual_pkg or target_pkg}"}
+                        verify = {
+                            "status": "done",
+                            "reason": f"open_app 后前台应用已切换为 {actual_pkg or target_pkg}",
+                            "next_hint": ""
+                        }
                         print(f"[open_app] 切换成功：{actual_pkg or target_pkg}")
                     reflect_usage = TokenUsage()
                 elif act_name in SKIP_REFLECT:
-                    verify = {"success": True, "reason": f"{act_name} 系统动作默认成功"}
+                    verify = {"status": "done", "reason": f"{act_name} 系统动作默认成功", "next_hint": ""}
                     reflect_usage = TokenUsage()
                     print(f"[Reflector] 跳过（{act_name} 系统动作）")
                 else:
@@ -612,7 +624,8 @@ class AccessAgentServer:
                         self.reflector.verify, current_step, action, ui_text_before, ui_text_after
                     )
                     usage.add_text(reflect_usage)
-                    print(f"[Reflector] 成功：{verify.get('success')} | {verify.get('reason')}")
+                    reflect_status_dbg = verify.get("status", "?")
+                    print(f"[Reflector] {reflect_status_dbg} | {verify.get('reason')}")
                     print(f"[Token] 反思用量：{reflect_usage}")
 
                 # ── 9. 本步 token 小计 ───────────────────────────
@@ -621,17 +634,33 @@ class AccessAgentServer:
                     step_total += vision_usage.total
                 print(f"[Token] 本步合计：{step_total} | 累计：{usage.grand_total}")
 
+                # ── 10. 三状态处理：done / progress / stuck ──────
+                reflect_status = verify.get("status")
+                if reflect_status is None:
+                    # 兼容旧格式 success: true/false
+                    reflect_status = "done" if verify.get("success") else "stuck"
+
+                status_label = {
+                    "done": "完成", "progress": "进行中", "stuck": "失败"
+                }.get(reflect_status, "失败")
                 history.append(
-                    f"步骤{step_index + 1}：{current_step} -> "
-                    f"{action.get('action')} -> "
-                    f"{'成功' if verify.get('success') else '失败'}"
+                    f"步骤{step_index + 1}：{current_step[:50]} -> "
+                    f"{action.get('action')} -> [{status_label}] {verify.get('reason', '')[:60]}"
                 )
 
-                if verify.get("success"):
+                if reflect_status == "done":
                     step_index += 1
                     consecutive_failures = 0
                     failure_reason = ""
-                else:
+                elif reflect_status == "progress":
+                    # 有效推进，不计为失败，不换步骤
+                    consecutive_failures = 0
+                    failure_reason = ""
+                    next_hint = verify.get("next_hint", "")
+                    if next_hint:
+                        history.append(f"  → 提示：{next_hint}")
+                    print(f"[进行中] 步骤推进中：{verify.get('reason', '')}")
+                elif reflect_status == "stuck":
                     consecutive_failures += 1
                     total_failures += 1
                     failure_reason = verify.get("reason", "")
@@ -672,7 +701,9 @@ class AccessAgentServer:
 
                         # 重规划前：拍截图了解当前页面位置，避免规划出已在当前位置之前的步骤
                         print("[重规划] 截图分析当前页面状态...")
-                        screen_desc_replan, desc_usage2 = await self._describe_screen(websocket)
+                        screen_desc_replan, desc_usage2 = await self._describe_screen(
+                            websocket, label=f"replan_{replan_count}"
+                        )
                         usage.add_vision(desc_usage2)
 
                         # 从 history 中提取已尝试过的关键路径，告知 Planner 避免重复
@@ -729,10 +760,10 @@ class AccessAgentServer:
                                       completed_at=datetime.now().isoformat(),
                                       usage=usage_dict)
 
-    async def _validate_report(self, task: str, content: str) -> tuple[bool, str]:
+    async def _validate_report(self, task: str, content: str) -> tuple[bool, str, TokenUsage]:
         """
         校验 report 的内容是否真正回答了任务要求。
-        返回 (是否有效, 缺少什么)
+        返回 (是否有效, 缺少什么, token用量)
         """
         prompt = f"""你是一个结果验证专家。
 
@@ -763,18 +794,19 @@ Agent 准备汇报的内容：
 只输出 JSON，不要其他文字：
 {{"valid": true/false, "missing": "不合格时，用一句话说明缺少什么"}}"""
 
+        validate_usage = TokenUsage()
         try:
-            rsp, _ = await self._in_thread(self.text_llm.predict, prompt)
+            rsp, validate_usage = await self._in_thread(self.text_llm.predict, prompt)
             data = extract_json(rsp)
-            return data.get("valid", True), data.get("missing", "")
+            return data.get("valid", True), data.get("missing", ""), validate_usage
         except Exception as e:
             print(f"[校验] 解析失败（{e}），默认放行")
-            return True, ""
+            return True, "", validate_usage
 
-    async def _verify_operation(self, task: str, ui_text: str) -> tuple[bool, str]:
+    async def _verify_operation(self, task: str, ui_text: str) -> tuple[bool, str, TokenUsage]:
         """
         操作+验证类：通过当前界面文字判断操作是否真正成功完成。
-        返回 (是否成功, 原因说明)
+        返回 (是否成功, 原因说明, token用量)
         """
         prompt = f"""你是手机自动化验证专家。
 
@@ -793,13 +825,14 @@ Agent 准备汇报的内容：
 
 只输出 JSON：{{"success": true/false, "reason": "一句话说明判断依据"}}"""
 
+        verify_op_usage = TokenUsage()
         try:
-            rsp, _ = await self._in_thread(self.text_llm.predict, prompt)
+            rsp, verify_op_usage = await self._in_thread(self.text_llm.predict, prompt)
             data = extract_json(rsp)
-            return data.get("success", False), data.get("reason", "")
+            return data.get("success", False), data.get("reason", ""), verify_op_usage
         except Exception as e:
             print(f"[验证] 解析失败（{e}），默认放行")
-            return True, ""
+            return True, "", verify_op_usage
 
     def _build_partial_hint(self, action_log: list[dict], final_result: str | None) -> dict:
         """
