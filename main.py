@@ -35,6 +35,10 @@ async def main():
     print('  curl -X POST http://localhost:8000/task \\')
     print('       -H "Content-Type: application/json" \\')
     print('       -d \'{"task": "搜索NBA季后赛赛程并汇报给我"}\'')
+    print("  （可选）自定义最大步数：")
+    print('  curl -X POST http://localhost:8000/task \\')
+    print('       -H "Content-Type: application/json" \\')
+    print('       -d \'{"task": "去TG转发图片", "max_steps": 80}\'')
     print("=" * 50)
 
     # ── 优雅退出：SIGINT / SIGTERM 先让 uvicorn 正常停止 ──────────

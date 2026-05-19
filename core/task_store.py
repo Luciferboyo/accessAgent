@@ -27,6 +27,8 @@ class TaskRecord:
     progress: Optional[str] = None
     current_step: Optional[int] = None
     total_steps: Optional[int] = None
+    # 用户自定义最大步数（None 时使用 config.MAX_STEPS 全局默认值）
+    max_steps: Optional[int] = None
 
 
 class TaskStore:
@@ -36,12 +38,13 @@ class TaskStore:
         self.tasks: dict[str, TaskRecord] = {}
         self.queue: asyncio.Queue = asyncio.Queue()
 
-    async def submit(self, task: str) -> TaskRecord:
+    async def submit(self, task: str, max_steps: Optional[int] = None) -> TaskRecord:
         task_id = str(uuid.uuid4())[:8]
-        record = TaskRecord(task_id=task_id, task=task)
+        record = TaskRecord(task_id=task_id, task=task, max_steps=max_steps)
         self.tasks[task_id] = record
         await self.queue.put(task_id)
-        print(f"[TaskStore] 新任务入队 [{task_id}]：{task}")
+        steps_info = f"，max_steps={max_steps}" if max_steps else ""
+        print(f"[TaskStore] 新任务入队 [{task_id}]：{task}{steps_info}")
         return record
 
     def get(self, task_id: str) -> Optional[TaskRecord]:

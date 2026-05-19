@@ -197,8 +197,10 @@ class AccessAgentServer:
             print(f"[错误] 任务 {task_id} 在 store 中不存在，跳过")
             return
         task = record.task
+        # 优先使用用户提交时指定的 max_steps，否则使用全局配置
+        max_steps = record.max_steps if record.max_steps and record.max_steps > 0 else config.MAX_STEPS
 
-        print(f"[WS] 开始执行任务 [{task_id}]：{task}")
+        print(f"[WS] 开始执行任务 [{task_id}]：{task}（最大步数：{max_steps}）")
         self.store.update(task_id, status=TaskStatus.RUNNING)
 
         await websocket.send(json.dumps({"type": "task", "task": task}))
@@ -296,7 +298,7 @@ class AccessAgentServer:
             # ────────────────────────────────────────────────────────
             current_state = await self._request_state(websocket)
 
-            for global_step in range(config.MAX_STEPS):
+            for global_step in range(max_steps):
                 print(f"\n{'='*50}")
                 print(f"[Step {global_step + 1}] [{task_id}]")
 
@@ -784,11 +786,11 @@ class AccessAgentServer:
                                       usage=usage_dict)
                 else:
                     # 走完 MAX_STEPS 仍未完成
-                    print(f"\n[超限] 已达到最大步数 {config.MAX_STEPS} 步，任务未完成")
+                    print(f"\n[超限] 已达到最大步数 {max_steps} 步，任务未完成")
                     print(f"[超限] 完成步骤：{step_index}/{len(plan) if plan else '?'}")
                     self.store.update(task_id,
                                       status=TaskStatus.FAILED,
-                                      error=f"已达最大步数 {config.MAX_STEPS} 步，完成 {step_index}/{len(plan) if plan else '?'} 步",
+                                      error=f"已达最大步数 {max_steps} 步，完成 {step_index}/{len(plan) if plan else '?'} 步",
                                       completed_at=datetime.now().isoformat(),
                                       usage=usage_dict)
 

@@ -30,6 +30,7 @@ def create_app(store: TaskStore) -> FastAPI:
 
     class TaskRequest(BaseModel):
         task: str
+        max_steps: Optional[int] = None  # 自定义最大步数，不传则使用服务器默认值
 
     class TaskResponse(BaseModel):
         task_id: str
@@ -44,6 +45,7 @@ def create_app(store: TaskStore) -> FastAPI:
         progress: Optional[str] = None
         current_step: Optional[int] = None
         total_steps: Optional[int] = None
+        max_steps: Optional[int] = None  # 该任务实际使用的最大步数限制
 
     # ── 工具函数 ──────────────────────────────────────────
 
@@ -60,6 +62,7 @@ def create_app(store: TaskStore) -> FastAPI:
             progress=record.progress,
             current_step=record.current_step,
             total_steps=record.total_steps,
+            max_steps=record.max_steps,
         )
 
     # ── 路由 ─────────────────────────────────────────────
@@ -72,7 +75,7 @@ def create_app(store: TaskStore) -> FastAPI:
 
         返回 `task_id`，可用于后续查询状态。
         """
-        record = await _store.submit(req.task)
+        record = await _store.submit(req.task, max_steps=req.max_steps)
         return to_resp(record)
 
     @app.get("/task/{task_id}", response_model=TaskResponse, summary="查询任务状态")
