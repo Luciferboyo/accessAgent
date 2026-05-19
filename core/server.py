@@ -3,7 +3,6 @@ import base64
 import functools
 import json
 import os
-import re
 import websockets
 from dataclasses import dataclass
 from datetime import datetime
@@ -313,9 +312,9 @@ class AccessAgentServer:
                 print(f"[Token] 文本决策：{text_usage}")
 
                 # ── 4. 判断是否需要截图 ──────────────────────────
-                # 文本模型已决定 report/finish 时，不触发 Vision（避免被覆盖）
+                # 文本模型已决定 report/finish/find_package 时，不触发 Vision（避免被覆盖）
                 text_action = action.get("action")
-                if text_action in ("report", "finish"):
+                if text_action in ("report", "finish", "find_package"):
                     need_vision = False
                 else:
                     need_vision = (
@@ -628,7 +627,8 @@ class AccessAgentServer:
             self.store.update(task_id,
                               status=TaskStatus.FAILED,
                               error=str(e),
-                              completed_at=datetime.now().isoformat())
+                              completed_at=datetime.now().isoformat(),
+                              usage=usage.to_dict())
             raise
         finally:
             usage.print_final()

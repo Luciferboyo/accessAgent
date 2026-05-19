@@ -8,6 +8,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import subprocess
 import xml.etree.ElementTree as ET
 
@@ -238,7 +239,6 @@ async def do_home():
 async def get_foreground_package() -> str:
     """获取当前前台应用的包名"""
     result = await adb_async("shell dumpsys window windows", timeout=10)
-    import re
     m = re.search(r'mCurrentFocus=Window\{[^\s]+ [^\s]+ ([^/}\s]+)', result)
     return m.group(1) if m else ""
 
