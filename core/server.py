@@ -13,6 +13,7 @@ from models.llm import TextLLM, VisionLLM, TokenUsage
 from agents.planner import Planner
 from agents.executor import Executor
 from agents.reflector import Reflector
+from agents.task_analyzer import TaskAnalyzer
 from memory.task_memory import TaskMemory
 from core.ui_analyzer import UIAnalyzer
 from core.annotator import ScreenAnnotator
@@ -92,6 +93,7 @@ class AccessAgentServer:
         self.planner = Planner(text_llm)
         self.executor = Executor(text_llm, vision_llm)
         self.reflector = Reflector(text_llm)
+        self.task_analyzer = TaskAnalyzer(text_llm)
         self.memory = TaskMemory()
         self.analyzer = UIAnalyzer()
         self.annotator = ScreenAnnotator()
@@ -234,6 +236,62 @@ class AccessAgentServer:
             # 放在 try 内：若分类期间连接断开，finally 可正确标记任务失败
             task_type = await self._classify_task(task)
 
+            # ── 前置分析：前提验证 + 知识预判 ───────────────────────
+            from datetime import date as _date
+            today_str = _date.today().strftime("%Y-%m-%d")
+            print("[TaskAnalyzer] 分析任务前提与知识预判...")
+            analysis, analysis_usage = await self._in_thread(
+                self.task_analyzer.analyze, task, task_type, today_str
+            )
+            usage.add_text(analysis_usage)
+
+            if not analysis.get("valid", True):
+                # 任务前提不合理，直接拒绝，告知用户原因
+                issue = analysis.get("issue", "任务前提存在问题")
+                print(f"[TaskAnalyzer] ⚠ 任务前提有误：{issue}")
+                await websocket.send(json.dumps({
+                    "type": "finish",
+                    "message": f"任务无法执行：{issue}"
+                }))
+                self.store.update(task_id,
+                                  status=TaskStatus.FAILED,
+                                  error=f"任务前提有误：{issue}",
+                                  completed_at=datetime.now().isoformat(),
+                                  usage=usage.to_dict())
+                return  # finally 仍会执行 print_final
+
+            if task_type == "info" and analysis.get("can_answer_directly"):
+                # LLM 可以直接回答，无需手机操作
+                direct_answer = analysis.get("direct_answer", "")
+                if direct_answer:
+                    print("[TaskAnalyzer] ✓ 从 AI 知识库直接回答，无需手机操作")
+                    answer_with_note = (
+                        f"[此答案来自 AI 知识库，无需实时搜索]\n\n{direct_answer}"
+                    )
+                    self._save_report(task, answer_with_note)
+                    await websocket.send(json.dumps({
+                        "type": "finish",
+                        "message": "信息收集完成（AI 直接回答）"
+                    }))
+                    final_result = direct_answer
+                    success = True
+                    return  # finally 仍会执行，并根据 success=True 写入 COMPLETED
+
+            # 将 AI 预判信息注入 planner_hint，让 Planner 生成更有针对性的计划
+            hypothesis = analysis.get("hypothesis", "")
+            search_hint = analysis.get("search_hint", "")
+            if hypothesis or search_hint:
+                if planner_hint is None:
+                    planner_hint = {}
+                if hypothesis:
+                    planner_hint["hypothesis"] = hypothesis
+                if search_hint:
+                    planner_hint["search_hint"] = search_hint
+                print(f"[TaskAnalyzer] 知识预判已注入 Planner："
+                      f"{'hypothesis=' + hypothesis[:60] if hypothesis else ''}"
+                      f"{'  search_hint=' + search_hint[:60] if search_hint else ''}")
+
+            # ────────────────────────────────────────────────────────
             current_state = await self._request_state(websocket)
 
             for global_step in range(config.MAX_STEPS):

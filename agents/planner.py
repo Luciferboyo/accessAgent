@@ -77,8 +77,13 @@ class Planner:
                 parts.append(f"- 上次找到的部分信息：{hint['found_info'][:200]}")
             if hint.get("suggestion"):
                 parts.append(f"- 建议：{hint['suggestion']}")
+            # TaskAnalyzer 提供的 AI 知识预判，优先级最高
+            if hint.get("hypothesis"):
+                parts.append(f"- AI 知识预判（可作为搜索假设）：{hint['hypothesis']}")
+            if hint.get("search_hint"):
+                parts.append(f"- 推荐搜索策略：{hint['search_hint']}")
             if parts:
-                hint_text = "\n【上次经验参考（请避免重复相同弯路，尝试新路径）】\n" + "\n".join(parts) + "\n"
+                hint_text = "\n【规划参考信息（请充分利用）】\n" + "\n".join(parts) + "\n"
 
         # 定向截图生成的当前页面描述（帮助 Planner 了解起始位置，避免规划冗余导航步骤）
         screen_context = f"\n【当前页面状态】{screen_desc}\n" if screen_desc else ""
