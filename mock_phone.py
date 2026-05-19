@@ -15,7 +15,7 @@ import websockets
 
 # ── 配置 ──────────────────────────────────────────────
 SERVER_URL = "ws://localhost:8765"
-DEVICE = "emulator-5554"       # adb devices 查到的设备ID
+DEVICE = "R5CR20ECSQV"                    # ← 填入 adb devices 显示的设备ID，例如 "R5CW309XXXXX"
 SCREENSHOT_DIR = "./mock_screenshots"
 TEMP_DIR = "/sdcard"            # 手机端临时目录
 ADB_PATH = r"D:\soft\sofeware\Android\Sdk\platform-tools\adb.exe"
@@ -326,6 +326,18 @@ async def handle_session(ws, step_counter: list):
         elif msg_type == "search_web":
             await do_search_web(msg.get("query", ""))
             await ws.send(json.dumps({"type": "result", "status": "success"}))
+
+        # 查询设备上安装的包名
+        elif msg_type == "find_package":
+            keyword = msg.get("keyword", "").lower()
+            all_pkgs = await adb_async("shell pm list packages", timeout=15)
+            packages = [
+                line.replace("package:", "").strip()
+                for line in all_pkgs.splitlines()
+                if line.startswith("package:") and keyword in line.lower()
+            ]
+            print(f"[执行] find_package '{keyword}' → {packages}")
+            await ws.send(json.dumps({"type": "package_result", "packages": packages}))
 
         # 任务完成 —— 断开后重连，等待下一个任务
         elif msg_type == "finish":

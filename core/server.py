@@ -484,6 +484,33 @@ class AccessAgentServer:
                 except json.JSONDecodeError:
                     print(f"[警告] 动作执行响应解析失败，原始内容：{str(result_raw)[:100]}")
                     result = {"status": "unknown"}
+
+                # ── find_package 特殊处理：注入查询结果，重新让 Executor 决策 ──
+                if action.get("action") == "find_package":
+                    packages = result.get("packages", [])
+                    keyword = action.get("params", {}).get("keyword", "")
+                    if packages:
+                        pkg_str = "、".join(packages)
+                        failure_reason = (
+                            f"find_package 已查到设备上与 '{keyword}' 匹配的包名：{pkg_str}。"
+                            f"请直接使用正确的包名调用 open_app。"
+                        )
+                        history.append(
+                            f"步骤{step_index + 1}：find_package({keyword}) → {pkg_str}"
+                        )
+                        print(f"[find_package] 找到包名：{pkg_str}")
+                    else:
+                        failure_reason = (
+                            f"find_package 未找到关键词 '{keyword}' 对应的已安装应用，"
+                            f"请确认应用是否已安装，或尝试换一个更短的关键词重新查询。"
+                        )
+                        history.append(
+                            f"步骤{step_index + 1}：find_package({keyword}) → 未找到匹配包名"
+                        )
+                        print(f"[find_package] 未找到匹配包名")
+                    current_state = await self._request_state(websocket)
+                    continue  # 不走 Reflector，直接让 Executor 用包名信息重新决策
+
                 print(f"[App] 执行状态：{result.get('status')}")
 
                 # ── 7. 获取新状态（复用为下一步）────────────────
@@ -805,6 +832,9 @@ Agent 准备汇报的内容：
             x, y = self.analyzer.get_center(elem)
             return {"type": "scroll", "x": x, "y": y,
                     "direction": params.get("direction", "up")}
+
+        if act == "find_package":
+            return {"type": "find_package", "keyword": params.get("keyword", "")}
 
         if act == "open_app":
             return {"type": "open_app", "package": params.get("package", "")}
