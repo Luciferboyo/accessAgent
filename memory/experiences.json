@@ -1,0 +1,103 @@
+[
+  {
+    "id": "im_forward_contact_select",
+    "tags": [
+      "telegram",
+      "tg",
+      "forward",
+      "转发",
+      "contact",
+      "联系人",
+      "share",
+      "分享",
+      "send to",
+      "选择联系人",
+      "org.telegram"
+    ],
+    "title": "TG/IM 转发联系人选择界面：防止反复 tap 同一位置死循环",
+    "rule": "在 TG/微信/WhatsApp 等应用的转发联系人界面，搜索并点击联系人后：\n1. 联系人条目旁（左侧头像圆圈）会出现蓝色勾选标记，表示已选中\n2. 屏幕【底部】会同时出现蓝色\"Share in N chat(s)\"或\"发送给 N 人\"确认按钮\n\n【选中联系人后的强制规则】：\n→ 立即把目光移到截图【底部】寻找蓝色确认发送按钮\n→ 一旦看到该按钮，必须 tap 其视觉中心，不要再 tap 联系人条目\n→ 再次 tap 已选中的联系人会【取消选中】，造成无限循环\n\n【连续多次 tap 同位置无效时】，按顺序检查：\n① 截图底部是否有蓝色 Share/Send 按钮 → 有则立即 tap，完成转发\n② 联系人左侧头像圆圈是否已有蓝色勾选 → 有则说明已选中，去找底部按钮\n③ 联系人未选中 → 尝试 tap 更靠右的区域（名称文字中心，x 坐标 +80~150px）\n④ 若联系人头像在截图中有编号方框，优先用 click(index) 而非 tap(x,y)"
+  },
+  {
+    "id": "im_confirm_button_tap",
+    "tags": [
+      "share",
+      "send",
+      "forward",
+      "confirm",
+      "发送",
+      "确认",
+      "转发",
+      "微信",
+      "wechat",
+      "telegram",
+      "tg",
+      "whatsapp",
+      "分享"
+    ],
+    "title": "IM 应用转发/分享确认按钮必须直接 tap(x,y)",
+    "rule": "在消息应用（微信/TG/WhatsApp 等）中，选完接收人后的底部确认按钮\n（如\"Share in N chat(s)\"、\"发送给 N 人\"、\"转发\"等蓝色大按钮）通常在 WebView 中渲染：\n→ click(index) 无法触达这类按钮，不要先尝试 click(index) 再等失败\n→ 【必须直接 tap(x,y)】，在截图中找到按钮视觉中心，换算为手机坐标后 tap"
+  },
+  {
+    "id": "chat_bubble_long_press",
+    "tags": [
+      "chat",
+      "bubble",
+      "image",
+      "photo",
+      "video",
+      "消息",
+      "图片",
+      "气泡",
+      "长按",
+      "long_click",
+      "聊天",
+      "forward",
+      "转发"
+    ],
+    "title": "聊天消息气泡（图片/视频）必须用 tap(x,y) 长按",
+    "rule": "聊天列表中的图片/视频/文件消息气泡是 WebView 渲染，没有独立无障碍节点：\n→ long_click(index) 会命中错误元素（如标题栏或输入框），无法触发气泡菜单\n→ 【必须用 tap(x,y)】精准点击缩略图/气泡的视觉中心，才能触发长按菜单或进入查看器"
+  },
+  {
+    "id": "planner_im_image_forward",
+    "tags": [
+      "telegram",
+      "tg",
+      "wechat",
+      "微信",
+      "whatsapp",
+      "image",
+      "photo",
+      "图片",
+      "forward",
+      "转发",
+      "消息",
+      "chat",
+      "聊天"
+    ],
+    "title": "IM 应用图片查找与转发的规划规则（Planner 用）",
+    "rule": "规划 TG/微信/WhatsApp 等 IM 应用的图片转发任务时：\n\n【查找最近图片】最短路径：\n→ 直接在聊天底部滚动到最新消息区域，最近图片缩略图就在那里\n→ 【严禁】规划\"进入 Media/相册 页面\"或\"聊天内搜索关键词定位图片\"——这些路径迂回且易失败\n\n【图片发起转发】两种合法路径（合并为一个步骤，任选其一）：\n→ 路径A：tap 图片缩略图 → 进入图片查看器 → 点击查看器内的 Forward 按钮\n→ 路径B：long_click 图片缩略图 → 弹出操作菜单 → 点击菜单中的 Forward/转发\n→ 两条路径都合法有效，\"进入图片查看器\"是正常推进，不是失败，应继续点击 Forward\n\n【步骤数量控制】：图片转发任务最多 4 步，\"找到图片并进入联系人选择界面\"合并为一步\n\n【底部确认按钮】：\n→ 联系人选择界面底部的\"Share in N chat(s)\"按钮在 WebView 中渲染，click(index) 可能无效\n→ 步骤中应提示执行器：若按钮无响应，改用 tap(x,y) 点击按钮视觉中心"
+  },
+  {
+    "id": "reflector_image_viewer",
+    "tags": [
+      "image",
+      "photo",
+      "图片",
+      "viewer",
+      "查看器",
+      "forward",
+      "转发",
+      "tap",
+      "thumbnail",
+      "缩略图",
+      "chat",
+      "聊天",
+      "telegram",
+      "tg",
+      "wechat",
+      "微信"
+    ],
+    "title": "聊天图片查看器：tap 缩略图跳转到查看器是正常推进，不能判为 stuck（Reflector 用）",
+    "rule": "在聊天中 tap 图片缩略图后，界面会跳转到图片查看器（通常显示 返回/编辑/Forward/更多，约 4-5 个元素）：\n→ 这是完全正常的推进，绝对不能判为 stuck\n\n【判断规则】：\n→ 步骤目标包含\"找到图片\"、\"发起转发\"、\"进入转发界面\"时：\n  · 图片查看器已打开，但尚未点击 Forward → progress，next_hint 提示点击 Forward 按钮\n  · 图片查看器已打开并点击了 Forward，进入联系人选择界面 → done\n→ 【严禁】因\"界面从聊天变成了图片查看器\"就判为 stuck——这是 tap 图片的必然结果"
+  }
+]

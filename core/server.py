@@ -6,6 +6,9 @@ import os
 import websockets
 from dataclasses import dataclass
 from datetime import datetime
+from io import BytesIO
+
+from PIL import Image as _PILImage
 
 from config import config
 from utils import extract_json
@@ -15,6 +18,7 @@ from agents.executor import Executor
 from agents.reflector import Reflector
 from agents.task_analyzer import TaskAnalyzer
 from memory.task_memory import TaskMemory
+from memory.experience_pool import ExperiencePool
 from core.ui_analyzer import UIAnalyzer
 from core.annotator import ScreenAnnotator
 from core.task_store import TaskStore, TaskStatus
@@ -95,6 +99,7 @@ class AccessAgentServer:
         self.reflector = Reflector(text_llm)
         self.task_analyzer = TaskAnalyzer(text_llm)
         self.memory = TaskMemory()
+        self.experience_pool = ExperiencePool()
         self.analyzer = UIAnalyzer()
         self.annotator = ScreenAnnotator()
 
@@ -119,10 +124,12 @@ class AccessAgentServer:
         """
         try:
             screenshot_b64 = await self._request_screenshot(websocket)
-            # 保存截图（不标注，仅用于描述），文件名带 label 以防重规划时覆盖初始截图
-            img_path = os.path.join(config.SCREENSHOT_DIR, f"{label}.png")
-            with open(img_path, "wb") as f:
-                f.write(base64.b64decode(screenshot_b64))
+            # 保存截图（不标注，仅用于描述），统一保存为 JPEG 避免 PNG 体积过大
+            img_path = os.path.join(config.SCREENSHOT_DIR, f"{label}.jpg")
+            _raw = base64.b64decode(screenshot_b64)
+            _PILImage.open(BytesIO(_raw)).convert("RGB").save(
+                img_path, format="JPEG", quality=85, optimize=True
+            )
 
             prompt = (
                 "请用一句话（不超过80字）描述当前手机屏幕的状态。\n"
@@ -238,6 +245,8 @@ class AccessAgentServer:
         force_accepted = False     # 是否为强制放行（用于记忆质量判断）
         force_vision_next_step = False  # tap 之后强制截图，避免 Text 用错坐标重点
         stuck_action_counts: dict[str, int] = {}  # 记录每个 (action:index) 累计卡住次数
+        last_tap_coords: tuple[int, int] | None = None   # 上一次 tap 的手机坐标
+        consecutive_same_tap = 0                         # 连续在相同位置 tap 的次数
 
         try:
             # 任务开始时分类一次，后续复用，不重复调用 LLM
@@ -321,8 +330,15 @@ class AccessAgentServer:
                     usage.add_vision(desc_usage)
 
                     print("[Planner] 生成任务计划...")
+                    _plan_app_pkg = current_state.get("package", "")
+                    _plan_exp = self.experience_pool.format_for_prompt(
+                        self.experience_pool.search(task=task, app_package=_plan_app_pkg)
+                    )
+                    if _plan_exp:
+                        print(f"[Experience] Planner 命中经验，已注入")
                     plan, plan_usage = await self._in_thread(
-                        self.planner.make_plan, task, ui_text, planner_hint, screen_desc
+                        self.planner.make_plan, task, ui_text, planner_hint, screen_desc,
+                        _plan_exp
                     )
                     usage.add_text(plan_usage)
                     # 生成失败时保底：把整个任务作为一个步骤
@@ -384,11 +400,21 @@ class AccessAgentServer:
                     total_steps=len(plan),
                 )
 
+                # ── 2.5 检索相关操作经验，注入当前步骤提示 ──────────
+                _app_pkg = current_state.get("package", "")
+                _exp_hits = self.experience_pool.search(
+                    task=task, app_package=_app_pkg, history=history
+                )
+                _experiences_text = self.experience_pool.format_for_prompt(_exp_hits)
+                if _exp_hits:
+                    print(f"[Experience] 命中 {len(_exp_hits)} 条经验：{[e['id'] for e in _exp_hits]}")
+
                 # ── 3. 优先文本决策 ──────────────────────────────
                 print("[Text] 尝试文本决策...")
                 action, text_usage = await self._in_thread(
                     self.executor.decide_text, current_step, step_index, len(plan),
-                    ui_text, history, failure_reason, consecutive_failures, task_type
+                    ui_text, history, failure_reason, consecutive_failures, task_type,
+                    _experiences_text
                 )
                 usage.add_text(text_usage)
                 print(f"[Text] {action.get('action')} | {action.get('reason')}")
@@ -431,10 +457,12 @@ class AccessAgentServer:
                         screenshot_b64, config.SCREENSHOT_DIR, global_step
                     )
                     screen_size = current_state.get("screen_size", [1080, 2340])
+                    # 标注路径：去掉原扩展名，加 _labeled.jpg（annotate 内部保存为 JPEG）
+                    stem = os.path.splitext(img_path)[0]
                     annotated = await self._in_thread(
                         self.annotator.annotate,
                         img_path, ui_elements,
-                        img_path.replace(".png", "_labeled.png"),
+                        stem + "_labeled.jpg",
                         screen_size
                     )
                     print(f"[Vision] 标注截图：{annotated}")
@@ -444,7 +472,8 @@ class AccessAgentServer:
                     action, vision_usage = await self._in_thread(
                         self.executor.decide_vision,
                         current_step, step_index, len(plan), annotated, ui_text, history,
-                        failure_reason, screen_size, img_size, consecutive_failures, task_type
+                        failure_reason, screen_size, img_size, consecutive_failures, task_type,
+                        _experiences_text
                     )
                     usage.add_vision(vision_usage)
                     print(f"[Vision] {action.get('action')} | {action.get('reason')}")
@@ -575,11 +604,18 @@ class AccessAgentServer:
                 if cmd is None:
                     # index 越界或元素 bounds 无效（不可见），跳过指令直接重试
                     print("[警告] 元素不存在或不可见，跳过本次指令，重新获取界面状态")
+                    # 元素极少（≤3）说明被困在弹窗/单按钮页面，Vision 在幻觉不存在的关闭按钮
+                    # 自动执行 back() 兜底脱困，避免死在弹窗里
+                    if len(ui_elements) <= 3:
+                        print("[兜底] 当前仅有极少元素，自动执行 back() 尝试脱困")
+                        await websocket.send(json.dumps({"type": "back"}))
+                        await websocket.recv()  # 消费执行结果
                     consecutive_failures += 1
                     total_failures += 1
                     failure_reason = (
                         f"AI 指定的元素编号不存在或该元素不可见（零尺寸）。"
                         f"当前共 {len(ui_elements)} 个元素，请只选择截图或文字描述中实际可见的元素编号。"
+                        + ("已自动执行 back() 尝试退出当前页面。" if len(ui_elements) <= 3 else "")
                     )
                     current_state = await self._request_state(websocket)
                     continue
@@ -650,12 +686,23 @@ class AccessAgentServer:
                         }
                         print(f"[open_app] 切换失败：目标={target_pkg}，实际={actual_pkg}")
                     else:
+                        # 仅当当前步骤的核心目标是"打开应用"时，才将本步标记为 done
+                        # 若步骤目标是应用内的导航/操作（如找图片、转发等），
+                        # open_app 只是纠偏动作，标记为 progress，避免错误跳过剩余步骤目标
+                        _step_is_open = (
+                            "open_app" in current_step
+                            or current_step.strip().startswith(("打开", "启动", "launch", "open", "Open"))
+                        )
+                        _status = "done" if _step_is_open else "progress"
+                        _hint = "" if _step_is_open else (
+                            f"已成功打开 {actual_pkg or target_pkg}，请继续在应用内完成当前步骤的目标"
+                        )
                         verify = {
-                            "status": "done",
+                            "status": _status,
                             "reason": f"open_app 后前台应用已切换为 {actual_pkg or target_pkg}",
-                            "next_hint": ""
+                            "next_hint": _hint
                         }
-                        print(f"[open_app] 切换成功：{actual_pkg or target_pkg}")
+                        print(f"[open_app] 切换成功：{actual_pkg or target_pkg}（步骤状态：{_status}）")
                     reflect_usage = TokenUsage()
                 elif act_name in SKIP_REFLECT:
                     verify = {
@@ -668,11 +715,47 @@ class AccessAgentServer:
                         # tap 专用于 WebView 内无编号按钮，结果无法从无障碍树读取
                         # 强制下一步截图确认，避免 Text 模型用错误坐标重复操作
                         force_vision_next_step = True
+
+                        # ── 连续相同位置 tap 检测 ────────────────────────
+                        # 若多次在同一坐标（±60px）tap 无变化，说明：
+                        # 联系人已被选中（再 tap 会取消），或位置不对，需提示换策略
+                        tap_x = action.get("params", {}).get("x", 0)
+                        tap_y = action.get("params", {}).get("y", 0)
+                        if last_tap_coords is not None:
+                            dx = abs(tap_x - last_tap_coords[0])
+                            dy = abs(tap_y - last_tap_coords[1])
+                            if dx <= 60 and dy <= 60:
+                                consecutive_same_tap += 1
+                            else:
+                                consecutive_same_tap = 0   # 位置改变，重置
+                        last_tap_coords = (tap_x, tap_y)
+
+                        if consecutive_same_tap >= 2:
+                            # 连续 3 次（0,1,2）相同位置 tap → 注入提示，触发视觉重新审视
+                            _tap_warn = (
+                                f"⚠️ 已连续 {consecutive_same_tap + 1} 次在相近坐标 "
+                                f"({tap_x},{tap_y}) 执行 tap，该位置可能在反复切换选中/取消选中状态。\n"
+                                f"【立即执行以下三步检查】：\n"
+                                f"① 查看截图【底部】：若有蓝色 [Share in N chat(s)] 或 [发送给 N 人] 按钮 → "
+                                f"说明联系人已选中，必须 tap 该底部按钮（不要再 tap 联系人），操作完成！\n"
+                                f"② 若底部无发送按钮，查看联系人头像左侧是否有勾选圆圈/蓝点 → "
+                                f"若有，等待底部按钮出现或尝试 tap 头像圆圈（x 约 {max(30, tap_x - 60)}，y 约 {tap_y}）。\n"
+                                f"③ 若联系人未被选中（无勾选标记），尝试点击更靠右的区域（联系人名称文字中心，x 坐标约 +80 到 +150）。"
+                            )
+                            failure_reason = _tap_warn
+                            consecutive_failures += 1
+                            total_failures += 1
+                            print(f"[tap检测] 连续相同位置 {consecutive_same_tap + 1} 次，注入提示")
+                    else:
+                        # 非 tap 系统动作：重置同位置 tap 计数
+                        consecutive_same_tap = 0
+                        last_tap_coords = None
                     print(f"[Reflector] 跳过（{act_name} 系统动作），标记为 progress")
                 else:
                     print("[Reflector] 自我反思...")
                     verify, reflect_usage = await self._in_thread(
-                        self.reflector.verify, current_step, action, ui_text_before, ui_text_after
+                        self.reflector.verify, current_step, action,
+                        ui_text_before, ui_text_after, _experiences_text
                     )
                     usage.add_text(reflect_usage)
                     reflect_status_dbg = verify.get("status", "?")
@@ -723,6 +806,8 @@ class AccessAgentServer:
                     step_index += 1
                     consecutive_failures = 0
                     failure_reason = ""
+                    consecutive_same_tap = 0   # 步骤完成，重置 tap 计数
+                    last_tap_coords = None
                 elif reflect_status == "progress":
                     # 有效推进，不计为失败，不换步骤
                     # 用衰减而非全量重置：避免 stuck/progress 交替时永远触不发重规划
@@ -806,7 +891,7 @@ class AccessAgentServer:
                         plan, replan_usage = await self._in_thread(
                             self.planner.revise_plan,
                             task, plan, step_index, failure_reason, ui_text_after,
-                            tried_approaches, screen_desc_replan
+                            tried_approaches, screen_desc_replan, _experiences_text
                         )
                         usage.add_text(replan_usage)
                         print(f"[Token] 重规划用量：{replan_usage}")
@@ -815,6 +900,8 @@ class AccessAgentServer:
                         step_index = 0        # 新计划从第 0 步开始
                         consecutive_failures = 0
                         failure_reason = ""
+                        consecutive_same_tap = 0   # 重规划重置 tap 计数
+                        last_tap_coords = None
                         stuck_action_counts.clear()  # 新计划重置卡死计数
 
         except websockets.ConnectionClosed:
@@ -942,9 +1029,11 @@ Agent 准备汇报的内容：
                       f"当前仅 {ui_element_count} 个元素（可能是 WebView），降级为截图验证...")
                 try:
                     screenshot_b64 = await self._request_screenshot(websocket)
-                    img_path = os.path.join(config.SCREENSHOT_DIR, "verify_vision.png")
-                    with open(img_path, "wb") as f:
-                        f.write(base64.b64decode(screenshot_b64))
+                    img_path = os.path.join(config.SCREENSHOT_DIR, "verify_vision.jpg")
+                    _raw = base64.b64decode(screenshot_b64)
+                    _PILImage.open(BytesIO(_raw)).convert("RGB").save(
+                        img_path, format="JPEG", quality=85, optimize=True
+                    )
 
                     vision_prompt = f"""你是手机自动化验证专家。
 

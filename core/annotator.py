@@ -69,13 +69,18 @@ class ScreenAnnotator:
             draw.rectangle(label_bg, fill=color)
             draw.text((x1 + 4, label_top + 2), str(idx), fill="white", font=font)
 
-        img.save(save_path)
-        return save_path
+        # 保存为 JPEG（质量 85），比 PNG 体积小 3-5 倍，避免 413 Payload Too Large
+        jpg_path = os.path.splitext(save_path)[0] + ".jpg"
+        img.save(jpg_path, format="JPEG", quality=85, optimize=True)
+        return jpg_path
 
     def save_screenshot(self, image_b64: str, directory: str, step: int) -> str:
         import base64
+        from io import BytesIO
         os.makedirs(directory, exist_ok=True)
-        path = os.path.join(directory, f"step_{step:03d}.png")
-        with open(path, "wb") as f:
-            f.write(base64.b64decode(image_b64))
+        # 解码原始图片（来自 mock_phone 的 JPEG），重新以 JPEG 保存，避免转为 PNG 膨胀
+        raw = base64.b64decode(image_b64)
+        img = Image.open(BytesIO(raw)).convert("RGB")
+        path = os.path.join(directory, f"step_{step:03d}.jpg")
+        img.save(path, format="JPEG", quality=85, optimize=True)
         return path

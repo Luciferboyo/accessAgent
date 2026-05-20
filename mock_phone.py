@@ -100,6 +100,30 @@ async def get_ui_elements() -> list[dict]:
         elements = []
         index = [1]
 
+        def _is_interactive(n) -> bool:
+            """判断节点本身是否可交互（可点击 / 可编辑 / 可滚动）"""
+            c = n.attrib.get("clickable") == "true"
+            e = n.attrib.get("focusable") == "true" and "EditText" in n.attrib.get("class", "")
+            s = n.attrib.get("scrollable") == "true"
+            return c or e or s
+
+        def _collect_child_info(node, texts: list, descs: list):
+            """
+            递归收集不可交互子孙节点的 text / content-desc，
+            遇到独立可交互节点（将拥有自己的 index）则停止深入。
+            """
+            for child in node:
+                if _is_interactive(child):
+                    # 独立可交互子节点：有自己的 index，不合并到父节点
+                    continue
+                t = child.attrib.get("text", "").strip()
+                d = child.attrib.get("content-desc", "").strip()
+                if t and t not in texts:
+                    texts.append(t)
+                if d and d not in descs:
+                    descs.append(d)
+                _collect_child_info(child, texts, descs)
+
         def parse_node(node):
             bounds_str = node.attrib.get("bounds", "")
             if not bounds_str:
@@ -121,11 +145,35 @@ async def get_ui_elements() -> list[dict]:
             scrollable = node.attrib.get("scrollable") == "true"
 
             if clickable or editable or scrollable:
+                # ── 收集自身 text / desc ──────────────────────────
+                base_text = node.attrib.get("text", "").strip()
+                base_desc = node.attrib.get("content-desc", "").strip()
+
+                # ── 向下收集不可交互子孙的 text / desc ──────────────
+                child_texts: list[str] = []
+                child_descs: list[str] = []
+                _collect_child_info(node, child_texts, child_descs)
+
+                # ── 去重合并：父节点信息优先，子节点追加 ────────────
+                merged_texts = []
+                if base_text:
+                    merged_texts.append(base_text)
+                for t in child_texts:
+                    if t and t not in merged_texts:
+                        merged_texts.append(t)
+
+                merged_descs = []
+                if base_desc:
+                    merged_descs.append(base_desc)
+                for d in child_descs:
+                    if d and d not in merged_descs:
+                        merged_descs.append(d)
+
                 elements.append({
                     "index": index[0],
                     "class": node.attrib.get("class", "").split(".")[-1],
-                    "text": node.attrib.get("text", ""),
-                    "content_desc": node.attrib.get("content-desc", ""),
+                    "text": " | ".join(merged_texts),
+                    "content_desc": " | ".join(merged_descs),
                     "resource_id": node.attrib.get("resource-id", ""),
                     "bounds": [x1, y1, x2, y2],
                     "clickable": clickable,
@@ -134,6 +182,8 @@ async def get_ui_elements() -> list[dict]:
                 })
                 index[0] += 1
 
+            # 无论当前节点是否可交互，都继续递归子节点
+            # 让独立可交互的子节点也能获得自己的 index
             for child in node:
                 parse_node(child)
 

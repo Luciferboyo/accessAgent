@@ -30,14 +30,6 @@ SYSTEM = """你是一个手机自动化规划专家。
 - 优先英文关键词：体育统计用 "box score YYYY-MM-DD"，股票用 代码+"stock price"
 - 体育球员数据：搜索 "[队名] box score [YYYY-MM-DD]" 可直接显示所有球员统计表格
 
-⚠️ 消息应用（TG/微信/WhatsApp）图片操作最短路径规则（必须严格遵守）：
-- 查找"最近一次图片/图片消息"：【最短路径】直接在聊天底部滚动到最新消息区域，最新图片缩略图就在那里
-  【严禁】规划"通过聊天内搜索关键词定位图片"或"进入 Media/相册 页面浏览"——这些路径迂回且极易失败
-- 图片转发三步完成：① 长按图片消息弹出操作菜单 → ② 点击"转发(Forward)" → ③ 搜索并选择接收人后发送
-  不要拆成超过 4 步，不要加"通过 Media 浏览"等中间步骤
-- TG 转发对话框（Send to.../Forward to...）底部的"Share in N chat(s)"确认按钮在 WebView 中渲染，
-  click(index) 可能无效，步骤中应提示执行器用 tap(x,y) 点击按钮视觉中心
-
 输出 JSON 格式：{"steps": ["步骤1", "步骤2", ...]}
 
 示例（打卡任务）：
@@ -64,9 +56,9 @@ SYSTEM = """你是一个手机自动化规划专家。
 
 示例（TG 图片转发任务）：
 {"steps": [
-  "在 TG 与 @bgyy008 的聊天中，滚动到最新消息区域，找到最近一次图片消息（直接在聊天底部查看，无需进入 Media）",
-  "长按该图片消息弹出操作菜单，选择"转发(Forward)"进入联系人选择界面",
-  "搜索并选择 @lucify_boyo（boyo），点击发送按钮完成转发（若按钮无响应，改用 tap(x,y) 点击其视觉中心）",
+  "在 TG 与 @bgyy008 的聊天中，滚动到最新消息区域找到最近一次图片消息（直接在聊天底部查看，无需进入 Media）",
+  "找到图片后发起转发并进入联系人选择界面——可 tap 图片缩略图进入查看器后点击 Forward，也可 long_click 图片弹出菜单后选 Forward，两种方式均可，进入联系人选择界面即为本步完成",
+  "搜索并选择 @lucify_boyo（boyo），点击确认发送按钮完成转发（若按钮无响应，改用 tap(x,y) 点击其视觉中心）",
   "进入与 @lucify_boyo 的对话，确认图片已作为最新消息出现"
 ]}"""
 
@@ -81,7 +73,8 @@ class Planner:
 
     def make_plan(self, task: str, ui_text: str,
                   hint: dict = None,
-                  screen_desc: str = "") -> tuple[list[str], TokenUsage]:
+                  screen_desc: str = "",
+                  experiences: str = "") -> tuple[list[str], TokenUsage]:
         # 有上次部分成功的经验时，拼入 prompt 让 Planner 避免重复走弯路
         hint_text = ""
         if hint:
@@ -105,9 +98,10 @@ class Planner:
         screen_context = f"\n【当前页面状态】{screen_desc}\n" if screen_desc else ""
 
         today = self._today()
+        experience_block = f"\n{experiences}\n" if experiences else ""
         prompt = f"""任务：{task}
 今天日期：{today}（请在所有涉及时效性数据的搜索词中使用此日期，不要使用"今天"等模糊词）
-{screen_context}{hint_text}
+{screen_context}{hint_text}{experience_block}
 当前界面元素：
 {ui_text}
 
@@ -124,7 +118,8 @@ class Planner:
                     completed: int, failure_reason: str,
                     ui_text: str,
                     tried_approaches: str = "",
-                    screen_desc: str = "") -> tuple[list[str], TokenUsage]:
+                    screen_desc: str = "",
+                    experiences: str = "") -> tuple[list[str], TokenUsage]:
         today = self._today()
 
         tried_text = (
@@ -134,11 +129,12 @@ class Planner:
 
         screen_context = f"\n【当前页面状态】{screen_desc}\n" if screen_desc else ""
 
+        experience_block = f"\n{experiences}\n" if experiences else ""
         prompt = f"""任务：{task}
 今天日期：{today}
 原计划：{json.dumps(original_plan, ensure_ascii=False)}
 已完成步骤数：{completed}，当前卡住原因：{failure_reason}
-{screen_context}{tried_text}
+{screen_context}{tried_text}{experience_block}
 当前界面元素：
 {ui_text}
 
