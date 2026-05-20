@@ -570,7 +570,8 @@ class AccessAgentServer:
                     break
 
                 # ── 6. 执行动作 ──────────────────────────────────
-                cmd = self._build_command(action, ui_elements)
+                cmd = self._build_command(action, ui_elements,
+                                          current_state.get("screen_size"))
                 if cmd is None:
                     # index 越界或元素 bounds 无效（不可见），跳过指令直接重试
                     print("[警告] 元素不存在或不可见，跳过本次指令，重新获取界面状态")
@@ -1078,10 +1079,12 @@ Agent 准备汇报的内容：
             print(f"[警告] _request_screenshot 响应解析失败（{e}），返回空字符串")
             return ""
 
-    def _build_command(self, action: dict, ui_elements: list[dict]) -> dict | None:
+    def _build_command(self, action: dict, ui_elements: list[dict],
+                       screen_size: list[int] = None) -> dict | None:
         """
         构建发给手机的指令。
         若 index 越界或元素 bounds 无效（不可见），返回 None，由调用方标记失败并重试。
+        screen_size: [width, height]，用于检测并修正靠近屏幕底部的点击坐标。
         """
         act = action.get("action")
         params = action.get("params", {})
@@ -1098,11 +1101,27 @@ Agent 准备汇报的内容：
             print(f"[警告] {act_name} 元素 index={target_idx} 不存在（共 {len(ui_elements)} 个）")
             return None
 
+        def safe_y(y: int, label: str = "") -> int:
+            """
+            若 y 坐标落在屏幕底部 8% 安全区以内（可能与导航条/手势区重叠），
+            自动上移至安全区上沿 - 20px。
+            典型场景：TG "Share in 1 chat" 按钮 bounds 被无障碍树报告到导航区内。
+            """
+            if screen_size and screen_size[1] > 0:
+                threshold = int(screen_size[1] * 0.92)
+                if y > threshold:
+                    adjusted = threshold - 20
+                    print(f"[坐标安全]{' ' + label if label else ''} "
+                          f"y={y} 超出安全区（>{threshold}），自动上移至 y={adjusted}")
+                    return adjusted
+            return y
+
         if act in ("click", "long_click"):
             elem = get_valid_elem(params.get("index", 1), act)
             if elem is None:
                 return None
             x, y = self.analyzer.get_center(elem)
+            y = safe_y(y, f"click index={params.get('index', 1)}")
             return {"type": act, "x": x, "y": y}
 
         if act == "type":
@@ -1110,6 +1129,7 @@ Agent 准备汇报的内容：
             if elem is None:
                 return None
             x, y = self.analyzer.get_center(elem)
+            y = safe_y(y, "type")
             return {"type": "type", "x": x, "y": y, "text": params.get("text", "")}
 
         if act == "scroll":
@@ -1117,6 +1137,7 @@ Agent 准备汇报的内容：
             if elem is None:
                 return None
             x, y = self.analyzer.get_center(elem)
+            y = safe_y(y, "scroll")
             return {"type": "scroll", "x": x, "y": y,
                     "direction": params.get("direction", "up")}
 
