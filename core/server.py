@@ -136,6 +136,9 @@ class AccessAgentServer:
             desc = rsp.strip()
             print(f"[定向] 当前页面：{desc}")
             return desc, usage
+        except websockets.ConnectionClosed:
+            # 连接断开不能静默吞掉，必须向上传播，让 handle() 正确标记任务失败
+            raise
         except Exception as e:
             print(f"[定向] 页面描述失败（{e}），跳过定向截图")
             return "", TokenUsage()
@@ -353,7 +356,9 @@ class AccessAgentServer:
                     # verify 任务需要在所有步骤完成后再做一次终态确认
                     if task_type == "verify":
                         print("[完成] 所有步骤执行完毕，执行操作结果终态验证...")
-                        verified, verify_reason, verify_op_usage = await self._verify_operation(task, ui_text)
+                        verified, verify_reason, verify_op_usage = await self._verify_operation(
+                            task, ui_text, websocket, len(ui_elements)
+                        )
                         usage.add_text(verify_op_usage)
                         if not verified:
                             print(f"[验证] 终态验证未通过：{verify_reason}，继续尝试")
@@ -463,7 +468,9 @@ class AccessAgentServer:
                             force_accepted = True
                         else:
                             print("[验证] 检查操作是否成功...")
-                            verified, verify_reason, verify_op_usage = await self._verify_operation(task, ui_text)
+                            verified, verify_reason, verify_op_usage = await self._verify_operation(
+                                task, ui_text, websocket, len(ui_elements)
+                            )
                             usage.add_text(verify_op_usage)
 
                         if not verified:
@@ -890,11 +897,16 @@ Agent 准备汇报的内容：
             print(f"[校验] 解析失败（{e}），默认放行")
             return True, "", validate_usage
 
-    async def _verify_operation(self, task: str, ui_text: str) -> tuple[bool, str, TokenUsage]:
+    async def _verify_operation(self, task: str, ui_text: str,
+                                websocket=None, ui_element_count: int = 99) -> tuple[bool, str, TokenUsage]:
         """
         操作+验证类：通过当前界面文字判断操作是否真正成功完成。
+        若文本验证失败且元素数量很少（WebView 场景，无障碍树看不到内容），
+        自动降级为截图视觉验证。
         返回 (是否成功, 原因说明, token用量)
         """
+        WEBVIEW_ELEM_THRESHOLD = 10  # 元素数低于此值视为 WebView，文本不可信
+
         prompt = f"""你是手机自动化验证专家。
 
 用户的任务：{task}
@@ -916,7 +928,56 @@ Agent 准备汇报的内容：
         try:
             rsp, verify_op_usage = await self._in_thread(self.text_llm.predict, prompt)
             data = extract_json(rsp)
-            return data.get("success", False), data.get("reason", ""), verify_op_usage
+            text_success = data.get("success", False)
+            text_reason = data.get("reason", "")
+
+            # 文本验证通过，直接返回
+            if text_success:
+                return True, text_reason, verify_op_usage
+
+            # 文本验证失败 + 元素极少（WebView 内容不在无障碍树里）→ 降级截图验证
+            if websocket and ui_element_count < WEBVIEW_ELEM_THRESHOLD:
+                print(f"[验证] 文本验证失败（{text_reason}），"
+                      f"当前仅 {ui_element_count} 个元素（可能是 WebView），降级为截图验证...")
+                try:
+                    screenshot_b64 = await self._request_screenshot(websocket)
+                    img_path = os.path.join(config.SCREENSHOT_DIR, "verify_vision.png")
+                    with open(img_path, "wb") as f:
+                        f.write(base64.b64decode(screenshot_b64))
+
+                    vision_prompt = f"""你是手机自动化验证专家。
+
+用户的任务：{task}
+
+请根据截图判断：该操作是否已经成功完成并在界面上有明确体现？
+
+判断标准：
+- 必须在截图中看到操作成功的明确标志（成功提示、记录条目、状态变化等）
+- 如果截图中可见相关成功记录（如打卡时间、发送的消息、点赞状态），即视为成功
+- 如果截图只显示空白容器或无关内容，判为未完成
+
+只输出 JSON：{{"success": true/false, "reason": "一句话说明判断依据"}}"""
+
+                    vision_rsp, vision_usage = await self._in_thread(
+                        self.vision_llm.predict, vision_prompt, img_path
+                    )
+                    verify_op_usage.prompt += vision_usage.prompt
+                    verify_op_usage.completion += vision_usage.completion
+                    verify_op_usage.cost += vision_usage.cost
+
+                    vision_data = extract_json(vision_rsp)
+                    vision_success = vision_data.get("success", False)
+                    vision_reason = vision_data.get("reason", "")
+                    print(f"[验证] 截图验证结果：{'✓' if vision_success else '✗'} {vision_reason}")
+                    return vision_success, vision_reason, verify_op_usage
+                except websockets.ConnectionClosed:
+                    raise
+                except Exception as e:
+                    print(f"[验证] 截图验证失败（{e}），沿用文本验证结果")
+
+            return False, text_reason, verify_op_usage
+        except websockets.ConnectionClosed:
+            raise
         except Exception as e:
             print(f"[验证] 解析失败（{e}），默认放行")
             return True, "", verify_op_usage
