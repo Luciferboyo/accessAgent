@@ -111,7 +111,10 @@ class Planner:
         try:
             data = extract_json(rsp)
             return data.get("steps", [task]), usage
-        except Exception:
+        except Exception as e:
+            # 解析失败时记录 raw 前 500 字，便于调试 Prompt 与模型输出
+            print(f"[Planner] make_plan JSON 解析失败（{e}），"
+                  f"raw 前 500 字：{rsp[:500]!r}")
             return [task], usage
 
     def revise_plan(self, task: str, original_plan: list[str],
@@ -147,5 +150,7 @@ class Planner:
         try:
             data = extract_json(rsp)
             return data.get("steps", original_plan[completed:]), usage
-        except Exception:
+        except Exception as e:
+            print(f"[Planner] revise_plan JSON 解析失败（{e}），"
+                  f"raw 前 500 字：{rsp[:500]!r}")
             return original_plan[completed:], usage

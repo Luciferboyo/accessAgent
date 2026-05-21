@@ -63,6 +63,7 @@ class TaskAnalyzer:
         # Bug fix: 预先初始化 usage，确保 LLM 调用成功但 JSON 解析失败时
         # 仍能返回真实的 token 用量，而不是归零的 TokenUsage()
         usage = TokenUsage()
+        rsp = ""
         try:
             rsp, usage = self.llm.predict(prompt, system=SYSTEM)
             data = extract_json(rsp)
@@ -81,9 +82,11 @@ class TaskAnalyzer:
                 result["direct_answer"] = ""
             return result, usage
         except Exception as e:
-            print(f"[TaskAnalyzer] 解析失败（{e}），默认放行")
+            # 解析失败时打印 raw 输出便于追溯。带 issue 标记，方便上游 grep
+            print(f"[TaskAnalyzer] 解析失败（{e}），默认放行；"
+                  f"raw 前 500 字：{rsp[:500]!r}")
             return {
-                "valid": True, "issue": "",
+                "valid": True, "issue": "analyzer_parse_failed",
                 "can_answer_directly": False, "direct_answer": "",
                 "hypothesis": "", "search_hint": "",
             }, usage  # 返回真实用量（若 LLM 调用成功但 JSON 解析失败）

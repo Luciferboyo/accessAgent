@@ -47,6 +47,19 @@ class Config:
     # 任务报告保存目录
     REPORTS_DIR: str = "./reports"
 
+    # HTTP API 安全配置
+    # CORS_ORIGINS：允许跨域访问的来源列表（逗号分隔），默认仅允许本机。
+    #   设置为 "*" 即关闭限制（生产环境强烈不推荐）。
+    # API_TOKEN：若非空，则所有写操作（POST/DELETE）需带 Header: X-API-Token: <token>
+    CORS_ORIGINS: str = os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost,http://localhost:8000,http://127.0.0.1,http://127.0.0.1:8000",
+    )
+    API_TOKEN: str = os.getenv("API_TOKEN", "")
+
+    # 单步 WebSocket 响应等待超时（秒）：避免手机端无响应时 _request_* 永久挂起
+    WS_RECV_TIMEOUT: int = int(os.getenv("WS_RECV_TIMEOUT", "60"))
+
 
 config = Config()
 

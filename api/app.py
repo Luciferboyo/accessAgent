@@ -1,16 +1,27 @@
 import os
 import tempfile
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 
-from core.task_store import TaskStore, TaskRecord
+from config import config
+from core.task_store import TaskStore, TaskRecord, TaskStatus
 
 # 全局 store / vision_llm，由 main.py 注入
 _store: Optional[TaskStore] = None
 _vision_llm = None
+
+
+def _parse_origins(raw: str) -> list[str]:
+    """解析 CORS_ORIGINS 字符串。'*' 直接放行；逗号分隔多个来源。"""
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    if raw == "*":
+        return ["*"]
+    return [o.strip() for o in raw.split(",") if o.strip()]
 
 
 def create_app(store: TaskStore, vision_llm=None) -> FastAPI:
@@ -24,12 +35,23 @@ def create_app(store: TaskStore, vision_llm=None) -> FastAPI:
         version="1.0.0",
     )
 
+    origins = _parse_origins(config.CORS_ORIGINS)
+    # 仅当配置为 "*" 时才放行所有来源；其余情况严格按白名单
+    allow_credentials = origins != ["*"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=origins or ["http://localhost"],
+        allow_credentials=allow_credentials,
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization", "X-API-Token"],
     )
+
+    # ── 鉴权依赖（仅写操作使用）─────────────────────────
+    def require_api_token(x_api_token: Optional[str] = Header(None)):
+        """若配置了 API_TOKEN，则写操作必须携带正确的 X-API-Token 头。"""
+        if config.API_TOKEN and x_api_token != config.API_TOKEN:
+            raise HTTPException(status_code=401, detail="无效或缺失的 X-API-Token")
+        return True
 
     # ── 请求 / 响应模型 ───────────────────────────────────
 
@@ -72,7 +94,8 @@ def create_app(store: TaskStore, vision_llm=None) -> FastAPI:
 
     # ── 路由 ─────────────────────────────────────────────
 
-    @app.post("/task", response_model=TaskResponse, summary="提交新任务")
+    @app.post("/task", response_model=TaskResponse, summary="提交新任务",
+              dependencies=[Depends(require_api_token)])
     async def submit_task(req: TaskRequest):
         """
         提交一个自动化任务。
@@ -103,26 +126,32 @@ def create_app(store: TaskStore, vision_llm=None) -> FastAPI:
         """返回所有任务列表（按创建时间倒序）。"""
         return [to_resp(r) for r in _store.list_all()]
 
-    @app.delete("/task/{task_id}", summary="删除任务记录")
+    @app.delete("/task/{task_id}", summary="删除任务记录",
+                dependencies=[Depends(require_api_token)])
     def delete_task(task_id: str):
         """删除任务记录（仅限已完成或失败的任务）。"""
         record = _store.get(task_id)
         if not record:
             raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
-        if record.status in ("pending", "running"):
+        if record.status in (TaskStatus.PENDING, TaskStatus.RUNNING,
+                             "pending", "running"):
             raise HTTPException(status_code=400, detail="任务正在执行中，无法删除")
         _store.delete(task_id)
         return {"message": f"任务 {task_id} 已删除"}
 
     @app.get("/health", summary="健康检查")
     def health():
-        pending = sum(1 for r in _store.tasks.values() if r.status == "pending")
-        running = sum(1 for r in _store.tasks.values() if r.status == "running")
+        # 用 snapshot 取快照后再统计，避免与并发写入产生 dict iteration race
+        snapshot = _store.snapshot()
+        pending = sum(1 for r in snapshot
+                      if r.status in (TaskStatus.PENDING, "pending"))
+        running = sum(1 for r in snapshot
+                      if r.status in (TaskStatus.RUNNING, "running"))
         return {
             "status": "ok",
             "queue_pending": pending,
             "running": running,
-            "total_tasks": len(_store.tasks),
+            "total_tasks": len(snapshot),
         }
 
     # ── 测试接口：直接上传图片文件 → VisionLLM ───────────────────────
@@ -135,7 +164,8 @@ def create_app(store: TaskStore, vision_llm=None) -> FastAPI:
         error: Optional[str] = None
 
     @app.post("/test/vision-raw", response_model=VisionTestResponse,
-              summary="测试：上传截图文件发送给 VisionLLM")
+              summary="测试：上传截图文件发送给 VisionLLM",
+              dependencies=[Depends(require_api_token)])
     async def test_vision_raw(
         file: UploadFile = File(..., description="截图文件（jpg/png/webp）"),
         prompt: str = Form("请描述这张图片的内容。"),
@@ -187,7 +217,7 @@ def create_app(store: TaskStore, vision_llm=None) -> FastAPI:
         finally:
             try:
                 os.unlink(tmp.name)
-            except OSError:
-                pass
+            except OSError as e:
+                print(f"[/test/vision-raw] 临时文件清理失败：{tmp.name}（{e}）")
 
     return app

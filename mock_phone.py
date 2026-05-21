@@ -44,6 +44,47 @@ async def adb_async(cmd: str, timeout: int = 30) -> str:
     return await loop.run_in_executor(None, adb, cmd, timeout)
 
 
+# ── 设备屏幕尺寸（启动时探测一次并缓存）────────────────────
+_SCREEN_SIZE_CACHE: list[int] | None = None
+_DEFAULT_SCREEN_SIZE: list[int] = [1080, 2340]   # 探测失败时的兜底值
+
+
+async def get_screen_size() -> list[int]:
+    """
+    动态获取设备物理分辨率 [width, height]，缓存结果。
+    优先解析 `wm size` 中的 'Override size'（用户改过分辨率时），其次 'Physical size'。
+    任何失败都退回 _DEFAULT_SCREEN_SIZE，并打印警告。
+    """
+    global _SCREEN_SIZE_CACHE
+    if _SCREEN_SIZE_CACHE is not None:
+        return _SCREEN_SIZE_CACHE
+
+    raw = await adb_async("shell wm size", timeout=10)
+    if raw in ("ERROR", "TIMEOUT") or not raw:
+        print(f"[ScreenSize] wm size 调用失败（{raw}），使用默认值 {_DEFAULT_SCREEN_SIZE}")
+        _SCREEN_SIZE_CACHE = list(_DEFAULT_SCREEN_SIZE)
+        return _SCREEN_SIZE_CACHE
+
+    # wm size 可能输出:
+    #   Physical size: 1080x2340
+    #   Override size: 720x1560    (可选)
+    # 优先 Override（实际生效），其次 Physical
+    sizes: dict[str, list[int]] = {}
+    for line in raw.splitlines():
+        m = re.search(r"(Physical|Override)\s+size:\s*(\d+)x(\d+)", line, re.IGNORECASE)
+        if m:
+            label = m.group(1).lower()
+            sizes[label] = [int(m.group(2)), int(m.group(3))]
+    parsed = sizes.get("override") or sizes.get("physical")
+    if not parsed:
+        print(f"[ScreenSize] 无法解析 wm size 输出：{raw[:120]}，使用默认值")
+        parsed = list(_DEFAULT_SCREEN_SIZE)
+    else:
+        print(f"[ScreenSize] 设备分辨率：{parsed[0]}x{parsed[1]}")
+    _SCREEN_SIZE_CACHE = parsed
+    return _SCREEN_SIZE_CACHE
+
+
 # ── 截图 ──────────────────────────────────────────────
 
 async def take_screenshot(step: int) -> str:
@@ -201,16 +242,76 @@ async def get_ui_elements() -> list[dict]:
 
 # ── 动作执行 ───────────────────────────────────────────
 
+# 各类动作的等待参数：min 是固定最小等待，max 是智能等待的上限
+# 智能等待会在 min 之后开始轮询，一旦检测到界面稳定就提前返回
+_WAIT_PROFILES = {
+    "click":      {"min": 0.25, "max": 1.5},
+    "long_click": {"min": 0.30, "max": 2.0},
+    "type":       {"min": 0.30, "max": 1.5},
+    "scroll":     {"min": 0.30, "max": 1.5},
+    "back":       {"min": 0.20, "max": 1.0},
+    "home":       {"min": 0.20, "max": 1.0},
+    "open_app":   {"min": 0.50, "max": 5.0},  # 应用启动差异大，上限留足
+    "search_web": {"min": 0.50, "max": 4.5},
+}
+
+
+async def _foreground_signature() -> str:
+    """
+    用 dumpsys window 拿当前焦点 window 作为"界面指纹"。
+    比 uiautomator dump 快 5-10 倍（~150ms vs ~800ms），适合做稳定性轮询。
+    """
+    result = await adb_async("shell dumpsys window windows", timeout=8)
+    m = re.search(r'mCurrentFocus=Window\{[^}]*\}', result)
+    return m.group(0) if m else result[:200]
+
+
+async def wait_until_stable(action: str,
+                            expect_pkg: str | None = None,
+                            min_wait: float | None = None,
+                            max_wait: float | None = None) -> None:
+    """
+    动作执行后智能等待界面稳定：
+    - 始终先固定等 min_wait（让点击/输入事件冒泡完成）
+    - 之后每 250ms 取一次"焦点 window 指纹"，连续两次相同 → 视为稳定，提前返回
+    - 若指定 expect_pkg，则在到达 max_wait 之前如果前台包不等于目标，会继续等待
+    - 最长不超过 max_wait
+
+    通过这套机制，open_app 类长 sleep 通常能从 3.5s 缩短到 1-2s。
+    """
+    profile = _WAIT_PROFILES.get(action, {"min": 0.3, "max": 1.5})
+    min_w = profile["min"] if min_wait is None else min_wait
+    max_w = profile["max"] if max_wait is None else max_wait
+
+    await asyncio.sleep(min_w)
+    elapsed = min_w
+    last_sig: str | None = None
+    poll = 0.25
+
+    while elapsed < max_w:
+        sig = await _foreground_signature()
+        # 包名期望未满足，强制继续轮询
+        pkg_ok = True
+        if expect_pkg:
+            pkg_ok = expect_pkg in sig
+        if last_sig is not None and sig == last_sig and pkg_ok:
+            return  # 稳定
+        last_sig = sig
+        await asyncio.sleep(poll)
+        elapsed += poll
+    # 超时也直接返回，让上层逻辑用下一次 get_ui_elements 兜底
+
+
 async def do_click(x: int, y: int):
     print(f"[执行] click ({x}, {y})")
     await adb_async(f"shell input tap {x} {y}")
-    await asyncio.sleep(0.8)
+    await wait_until_stable("click")
 
 
 async def do_long_click(x: int, y: int):
     print(f"[执行] long_click ({x}, {y})")
     await adb_async(f"shell input swipe {x} {y} {x} {y} 1000")
-    await asyncio.sleep(0.8)
+    await wait_until_stable("long_click")
 
 
 async def do_type(x: int, y: int, text: str):
@@ -234,7 +335,7 @@ async def do_type(x: int, y: int, text: str):
             if safe_text:
                 await adb_async(f"shell input text '{safe_text}'")
 
-    await asyncio.sleep(0.5)
+    await wait_until_stable("type")
 
 
 def _is_ascii(text: str) -> bool:
@@ -271,19 +372,19 @@ async def do_scroll(x: int, y: int, direction: str):
     }
     dx, dy = offsets.get(direction, (0, -dist))
     await adb_async(f"shell input swipe {x} {y} {x+dx} {y+dy} 300")
-    await asyncio.sleep(0.8)
+    await wait_until_stable("scroll")
 
 
 async def do_back():
     print("[执行] back")
     await adb_async("shell input keyevent KEYCODE_BACK")
-    await asyncio.sleep(0.5)
+    await wait_until_stable("back")
 
 
 async def do_home():
     print("[执行] home")
     await adb_async("shell input keyevent KEYCODE_HOME")
-    await asyncio.sleep(0.5)
+    await wait_until_stable("home")
 
 
 async def get_foreground_package() -> str:
@@ -293,10 +394,46 @@ async def get_foreground_package() -> str:
     return m.group(1) if m else ""
 
 
+async def _resolve_launcher_component(package: str) -> str | None:
+    """
+    通过 cmd package resolve-activity 拿到目标应用的 LAUNCHER 组件名。
+    返回形如 "com.foo/.MainActivity"，失败时返回 None。
+    """
+    out = await adb_async(
+        f"shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER {package}",
+        timeout=10,
+    )
+    if out in ("ERROR", "TIMEOUT") or not out:
+        return None
+    # 输出最后一行通常是 "com.foo/.bar.MainActivity"
+    for line in reversed(out.splitlines()):
+        line = line.strip()
+        if "/" in line and " " not in line and line.startswith(package):
+            return line
+    return None
+
+
 async def do_open_app(package: str):
+    """
+    优先用 `am start -n <component>` 启动（不会被反 monkey 检测拦截，
+    部分银行/支付/IM 应用对 monkey 启动会拒绝）。
+    解析 LAUNCHER 组件失败时回退 monkey。
+    """
     print(f"[执行] open_app {package}")
-    await adb_async(f"shell monkey -p {package} -c android.intent.category.LAUNCHER 1")
-    await asyncio.sleep(3.5)  # 给应用足够的启动时间
+    component = await _resolve_launcher_component(package)
+    started = False
+    if component:
+        result = await adb_async(f"shell am start -n {component}", timeout=10)
+        # am start 成功输出包含 "Starting: Intent"；失败时多带 "Error" 或 "Exception"
+        if result not in ("ERROR", "TIMEOUT") and "Error" not in result and "Exception" not in result:
+            started = True
+            print(f"[open_app] am start 启动：{component}")
+        else:
+            print(f"[open_app] am start 失败（{result[:80]}），降级为 monkey")
+    if not started:
+        await adb_async(f"shell monkey -p {package} -c android.intent.category.LAUNCHER 1")
+    # 智能等待：一旦前台包变为目标且界面稳定即返回，最长 5s
+    await wait_until_stable("open_app", expect_pkg=package)
 
 
 async def do_search_web(query: str):
@@ -306,7 +443,7 @@ async def do_search_web(query: str):
     url = f"https://www.google.com/search?q={encoded}"
     print(f"[执行] search_web: {url}")
     await adb_async(f'shell am start -a android.intent.action.VIEW -d "{url}" com.android.chrome')
-    await asyncio.sleep(3.0)
+    await wait_until_stable("search_web", expect_pkg="com.android.chrome")
 
 
 # ── WebSocket 主循环 ────────────────────────────────────
@@ -326,15 +463,16 @@ async def handle_session(ws, step_counter: list):
         # 请求当前界面状态
         elif msg_type == "request_state":
             print("[状态] 获取 UI 树...")
-            elements, foreground_pkg = await asyncio.gather(
+            elements, foreground_pkg, screen_size = await asyncio.gather(
                 get_ui_elements(),
                 get_foreground_package(),
+                get_screen_size(),
             )
             print(f"[状态] 共 {len(elements)} 个可交互元素，前台应用：{foreground_pkg}")
             await ws.send(json.dumps({
                 "type": "state",
                 "package": foreground_pkg,
-                "screen_size": [1080, 2340],
+                "screen_size": screen_size,
                 "ui_elements": elements,
             }))
 

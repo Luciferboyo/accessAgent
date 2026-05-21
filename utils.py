@@ -55,12 +55,26 @@ def extract_json(text: str) -> dict:
     text = text.replace('‘', "'").replace('’', "'")
 
     # 括号计数法提取第一个完整 {...} 对象，避免多 JSON 对象时 rfind('}') 切错
+    # 必须跟踪字符串状态：字符串值里的 { } 不算结构括号，否则会在错位置截断
     start = text.find('{')
     if start == -1:
         raise ValueError("未找到 JSON 对象")
     depth = 0
+    in_string = False
+    escape_next = False
     json_str = None
     for i, ch in enumerate(text[start:], start):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\':
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue   # 字符串内的所有字符都跳过括号计数
         if ch == '{':
             depth += 1
         elif ch == '}':

@@ -238,6 +238,8 @@ class AccessAgentServer:
         consecutive_failures = 0
         total_failures = 0
         replan_count = 0
+        report_step_append_count = 0   # 信息收集任务追加 report 兜底步骤的次数（防止无限追加）
+        MAX_REPORT_STEP_APPENDS = 2
         failure_reason = ""
         usage = UsageSummary()
         final_result = None
@@ -366,12 +368,16 @@ class AccessAgentServer:
                 if plan is None or step_index >= len(plan):
                     if task_type == "info":
                         # 信息收集类任务走完所有计划步骤，但没有 report，强制补一步
-                        # 防止重复追加：检查最后一步是否已经是汇报步骤
                         report_step = "将目前收集到的所有信息整理后用 report 汇报给用户，如果信息不完整请说明原因"
-                        if plan and plan[-1] == report_step:
-                            # 汇报步骤已经存在但仍未执行成功，说明执行器无法完成
-                            # 强制结束，避免无限追加
-                            print("[注意] 汇报步骤已追加但仍未完成，强制以当前状态结束任务")
+                        # 双重保护：
+                        # ① 若最后一步已是 report_step（Planner 重规划后仍保留），不再追加
+                        # ② 总追加次数硬上限 MAX_REPORT_STEP_APPENDS，防止 Planner 改写 plan 导致字符串比对失效后无限追加
+                        already_has_report_step = bool(plan) and plan[-1] == report_step
+                        if already_has_report_step or report_step_append_count >= MAX_REPORT_STEP_APPENDS:
+                            print(
+                                f"[注意] 汇报步骤已追加 {report_step_append_count} 次但仍未完成，"
+                                f"强制以当前状态结束任务"
+                            )
                             await websocket.send(json.dumps({"type": "finish", "message": "信息收集未能完成，任务结束"}))
                             self.store.update(task_id,
                                               status=TaskStatus.FAILED,
@@ -383,6 +389,7 @@ class AccessAgentServer:
                         if plan is None:
                             plan = []
                         plan.append(report_step)
+                        report_step_append_count += 1
                         failure_reason = "所有规划步骤已完成，现在必须用 report 汇报收集到的内容"
                         continue
                     # verify 任务需要在所有步骤完成后再做一次终态确认
@@ -401,9 +408,14 @@ class AccessAgentServer:
                         print(f"[验证] 终态验证通过：{verify_reason}")
                     print("[完成] 所有步骤执行完毕")
                     await websocket.send(json.dumps({"type": "finish", "message": "任务完成"}))
-                    self.memory.save_flow(task, plan, action_log, quality="full")
+                    # 同步落盘放进线程池，避免阻塞事件循环
+                    await self._in_thread(
+                        self.memory.save_flow, task, plan, action_log, "full", None
+                    )
                     _main_app = current_state.get("package", "")
-                    self.step_fragments.ingest_task(task, _main_app, plan, action_log)
+                    await self._in_thread(
+                        self.step_fragments.ingest_task, task, _main_app, plan, action_log
+                    )
                     success = True
                     break
 
@@ -441,9 +453,16 @@ class AccessAgentServer:
                 # ── 4. 判断是否需要截图 ──────────────────────────
                 # 文本模型已决定 report/finish/find_package 时，不触发 Vision（避免被覆盖）
                 text_action = action.get("action")
-                if text_action in ("report", "finish", "find_package", "tap"):
+                if text_action in ("report", "finish", "find_package"):
                     need_vision = False
                     _force_by_tap = False
+                elif text_action == "tap":
+                    # tap 本身不需要再截图决策（已由文本/上一轮 Vision 拿到了坐标）；
+                    # 但若上一轮 tap 留下 force_vision_next_step，需保留该标志到下一轮使用，
+                    # 否则会被本轮 tap 静默吞掉，下一步又用错坐标。
+                    need_vision = False
+                    _force_by_tap = False
+                    # 注意：此处不重置 force_vision_next_step，下方统一处理
                 else:
                     _force_by_tap = force_vision_next_step
                     need_vision = (
@@ -454,7 +473,9 @@ class AccessAgentServer:
                     )
                     if _force_by_tap:
                         print("[Vision] 上一步为 tap 操作，强制截图确认结果")
-                force_vision_next_step = False  # 消费后重置
+                # 仅在标志被消费（_force_by_tap 触发了 Vision）或非 tap 分支时重置
+                if text_action != "tap":
+                    force_vision_next_step = False
 
                 vision_usage = None
                 if need_vision:
@@ -484,9 +505,16 @@ class AccessAgentServer:
                         screen_size
                     )
                     print(f"[Vision] 标注截图：{annotated}")
-                    # 计算截图尺寸（mock_phone 压缩至 max_width=720）
-                    _scale = 720 / screen_size[0] if screen_size[0] > 0 else 1.0
-                    img_size = (720, int(screen_size[1] * _scale))
+                    # 直接读取已标注图片的真实尺寸，不再依赖硬编码 720 宽度
+                    # （mock_phone 默认压缩到 720，但真 App 替换后可能用不同压缩参数）
+                    try:
+                        with _PILImage.open(annotated) as _im:
+                            img_size = _im.size  # (width, height)
+                    except Exception as _e:
+                        # 兜底：按 mock_phone 的默认压缩宽度推算
+                        print(f"[Vision] 读取标注图尺寸失败（{_e}），使用兜底值")
+                        _scale = 720 / screen_size[0] if screen_size[0] > 0 else 1.0
+                        img_size = (720, int(screen_size[1] * _scale))
                     action, vision_usage = await self._in_thread(
                         self.executor.decide_vision,
                         current_step, step_index, len(plan), annotated, ui_text, history,
@@ -543,11 +571,17 @@ class AccessAgentServer:
                     await websocket.send(json.dumps({"type": "finish", "message": "任务完成"}))
                     if force_accepted:
                         hint = self._build_partial_hint(action_log, None)
-                        self.memory.save_flow(task, plan, action_log, quality="partial", hint=hint)
+                        await self._in_thread(
+                            self.memory.save_flow, task, plan, action_log, "partial", hint
+                        )
                     else:
-                        self.memory.save_flow(task, plan, action_log, quality="full")
+                        await self._in_thread(
+                            self.memory.save_flow, task, plan, action_log, "full", None
+                        )
                         _main_app = current_state.get("package", "")
-                        self.step_fragments.ingest_task(task, _main_app, plan, action_log)
+                        await self._in_thread(
+                            self.step_fragments.ingest_task, task, _main_app, plan, action_log
+                        )
                     success = True
                     print("[完成] 任务成功结束")
                     break
@@ -610,11 +644,17 @@ class AccessAgentServer:
                     await websocket.send(json.dumps({"type": "finish", "message": "信息收集完成"}))
                     if force_accepted:
                         hint = self._build_partial_hint(action_log, content)
-                        self.memory.save_flow(task, plan, action_log, quality="partial", hint=hint)
+                        await self._in_thread(
+                            self.memory.save_flow, task, plan, action_log, "partial", hint
+                        )
                     else:
-                        self.memory.save_flow(task, plan, action_log, quality="full")
+                        await self._in_thread(
+                            self.memory.save_flow, task, plan, action_log, "full", None
+                        )
                         _main_app = current_state.get("package", "")
-                        self.step_fragments.ingest_task(task, _main_app, plan, action_log)
+                        await self._in_thread(
+                            self.step_fragments.ingest_task, task, _main_app, plan, action_log
+                        )
                     final_result = content
                     success = True
                     print("[完成] 信息收集完成")
@@ -974,6 +1014,13 @@ class AccessAgentServer:
                         profile_page_consecutive = 0
 
         except websockets.ConnectionClosed:
+            # 若任务尚未真正开始执行（无任何动作落地），将任务重新入队，
+            # 让下一个连接的客户端可以继续处理，避免一次断连永久丢任务。
+            if not action_log:
+                print(f"[WS] 连接断开（任务 [{task_id}] 尚未开始），重新入队等待重试")
+                await self.store.requeue(task_id)
+                # requeue 已把状态改回 PENDING，finally 中的 `status == RUNNING` 判定不会触发
+                return
             print(f"[WS] 连接断开，任务 [{task_id}] 中止")
             self.store.update(task_id,
                               status=TaskStatus.FAILED,
@@ -1213,15 +1260,39 @@ Agent 准备汇报的内容：
         return "\n".join(lines)
 
     def _save_report(self, task: str, content: str):
+        """
+        原子写入任务报告。
+        - 文件名带毫秒级时间戳 + 6 位随机后缀，避免并发提交撞名覆盖
+        - 先写入临时文件再 os.replace，防止写入中断留下半文件
+        """
+        import tempfile
+        import secrets
+
         os.makedirs(config.REPORTS_DIR, exist_ok=True)
         now = datetime.now()
-        timestamp = now.strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(config.REPORTS_DIR, f"report_{timestamp}.txt")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(f"任务：{task}\n")
-            f.write(f"时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write("=" * 50 + "\n")
-            f.write(content)
+        # %f = 微秒，截前 3 位即毫秒；再叠加 secrets 防止极端撞名
+        timestamp = now.strftime("%Y%m%d_%H%M%S_") + now.strftime("%f")[:3]
+        suffix = secrets.token_hex(3)   # 6 位 hex
+        path = os.path.join(config.REPORTS_DIR, f"report_{timestamp}_{suffix}.txt")
+
+        body = (
+            f"任务：{task}\n"
+            f"时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            + "=" * 50 + "\n"
+            + content
+        )
+
+        # 原子写：先 tmp 再 replace
+        try:
+            fd, tmp_path = tempfile.mkstemp(dir=config.REPORTS_DIR, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(body)
+            os.replace(tmp_path, path)
+        except OSError as e:
+            # 写入失败兜底：直接打印，不让保存失败阻塞任务流程
+            print(f"[Report] 文件写入失败（{e}），仅打印不落盘")
+            path = "<未保存>"
+
         print("\n" + "=" * 50)
         print("📋 收集到的信息：")
         print("=" * 50)
@@ -1229,9 +1300,18 @@ Agent 准备汇报的内容：
         print("=" * 50)
         print(f"📁 已保存到：{path}")
 
+    async def _recv_with_timeout(self, websocket, label: str):
+        """带超时的 WebSocket recv，避免手机端无响应导致协程永久挂起。"""
+        try:
+            return await asyncio.wait_for(websocket.recv(), timeout=config.WS_RECV_TIMEOUT)
+        except asyncio.TimeoutError as e:
+            raise RuntimeError(
+                f"等待手机端响应超时（>{config.WS_RECV_TIMEOUT}s, label={label}）"
+            ) from e
+
     async def _request_state(self, websocket) -> dict:
         await websocket.send(json.dumps({"type": "request_state"}))
-        raw = await websocket.recv()
+        raw = await self._recv_with_timeout(websocket, "request_state")
         try:
             return json.loads(raw)
         except json.JSONDecodeError as e:
@@ -1240,7 +1320,7 @@ Agent 准备汇报的内容：
 
     async def _request_screenshot(self, websocket) -> str:
         await websocket.send(json.dumps({"type": "request_screenshot"}))
-        raw = await websocket.recv()
+        raw = await self._recv_with_timeout(websocket, "request_screenshot")
         try:
             return json.loads(raw).get("screenshot", "")
         except json.JSONDecodeError as e:
