@@ -18,6 +18,7 @@ from agents.executor import Executor
 from agents.reflector import Reflector
 from agents.task_analyzer import TaskAnalyzer
 from memory.task_memory import TaskMemory
+from memory.step_fragment_memory import StepFragmentMemory
 from memory.experience_pool import ExperiencePool
 from core.ui_analyzer import UIAnalyzer
 from core.annotator import ScreenAnnotator
@@ -99,6 +100,7 @@ class AccessAgentServer:
         self.reflector = Reflector(text_llm)
         self.task_analyzer = TaskAnalyzer(text_llm)
         self.memory = TaskMemory()
+        self.step_fragments = StepFragmentMemory()
         self.experience_pool = ExperiencePool()
         self.analyzer = UIAnalyzer()
         self.annotator = ScreenAnnotator()
@@ -332,11 +334,24 @@ class AccessAgentServer:
 
                     print("[Planner] 生成任务计划...")
                     _plan_app_pkg = current_state.get("package", "")
+
+                    # 注入人工经验（ExperiencePool）
                     _plan_exp = self.experience_pool.format_for_prompt(
                         self.experience_pool.search(task=task, app_package=_plan_app_pkg)
                     )
                     if _plan_exp:
                         print(f"[Experience] Planner 命中经验，已注入")
+
+                    # 注入步骤片段记忆（StepFragmentMemory）
+                    _frag_hints = self.step_fragments.find_relevant(
+                        task, app=_plan_app_pkg, top_k=4
+                    )
+                    _frag_text = self.step_fragments.format_for_planner(_frag_hints)
+                    if _frag_text:
+                        print(f"[FragmentMemory] Planner 命中 {len(_frag_hints)} 条步骤片段，已注入")
+                        # 将片段提示追加到经验文本后面（共用同一注入通道）
+                        _plan_exp = "\n\n".join(filter(None, [_plan_exp, _frag_text]))
+
                     plan, plan_usage = await self._in_thread(
                         self.planner.make_plan, task, ui_text, planner_hint, screen_desc,
                         _plan_exp
@@ -387,6 +402,8 @@ class AccessAgentServer:
                     print("[完成] 所有步骤执行完毕")
                     await websocket.send(json.dumps({"type": "finish", "message": "任务完成"}))
                     self.memory.save_flow(task, plan, action_log, quality="full")
+                    _main_app = current_state.get("package", "")
+                    self.step_fragments.ingest_task(task, _main_app, plan, action_log)
                     success = True
                     break
 
@@ -529,6 +546,8 @@ class AccessAgentServer:
                         self.memory.save_flow(task, plan, action_log, quality="partial", hint=hint)
                     else:
                         self.memory.save_flow(task, plan, action_log, quality="full")
+                        _main_app = current_state.get("package", "")
+                        self.step_fragments.ingest_task(task, _main_app, plan, action_log)
                     success = True
                     print("[完成] 任务成功结束")
                     break
@@ -594,6 +613,8 @@ class AccessAgentServer:
                         self.memory.save_flow(task, plan, action_log, quality="partial", hint=hint)
                     else:
                         self.memory.save_flow(task, plan, action_log, quality="full")
+                        _main_app = current_state.get("package", "")
+                        self.step_fragments.ingest_task(task, _main_app, plan, action_log)
                     final_result = content
                     success = True
                     print("[完成] 信息收集完成")
@@ -627,7 +648,10 @@ class AccessAgentServer:
 
                     print(f"[执行] 发送指令：{cmd}")
                     await websocket.send(json.dumps(cmd))
-                    action_log.append(action)
+                    # _step_index / _step_goal 供 StepFragmentMemory 拆解步骤用
+                    action_log.append({**action,
+                                       "_step_index": step_index,
+                                       "_step_goal": current_step})
 
                     result_raw = await websocket.recv()
                     try:
@@ -668,7 +692,9 @@ class AccessAgentServer:
                     print(f"[App] 执行状态：{result.get('status')}")
                 else:
                     # step_done 不发送指令，仅记录到日志
-                    action_log.append(action)
+                    action_log.append({**action,
+                                       "_step_index": step_index,
+                                       "_step_goal": current_step})
                     print(f"[step_done] Vision 确认子步骤已完成，跳过指令执行，直接推进")
 
                 # ── 7. 获取新状态（复用为下一步）────────────────
