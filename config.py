@@ -60,6 +60,9 @@ class Config:
     # 单步 WebSocket 响应等待超时（秒）：避免手机端无响应时 _request_* 永久挂起
     WS_RECV_TIMEOUT: int = int(os.getenv("WS_RECV_TIMEOUT", "60"))
 
+    # 定时任务调度器时区。打卡场景默认上海时区；如需 UTC 或其他，改成 'UTC' / 'America/Los_Angeles' 等
+    SCHEDULER_TIMEZONE: str = os.getenv("SCHEDULER_TIMEZONE", "Asia/Shanghai")
+
 
 config = Config()
 

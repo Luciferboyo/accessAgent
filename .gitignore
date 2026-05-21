@@ -23,6 +23,8 @@ reports/
 # 任务记忆（本地运行时数据）
 memory/task_flows.json
 memory/step_fragments.json
+memory/schedules.json
+memory/holiday_cache.json
 
 # Node / npm（项目为纯 Python，不应提交）
 node_modules/

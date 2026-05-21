@@ -3,15 +3,17 @@ import tempfile
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 
 from config import config
 from core.task_store import TaskStore, TaskRecord, TaskStatus
+from core.scheduler import Scheduler
 
-# 全局 store / vision_llm，由 main.py 注入
+# 全局 store / vision_llm / scheduler，由 main.py 注入
 _store: Optional[TaskStore] = None
 _vision_llm = None
+_scheduler: Optional[Scheduler] = None
 
 
 def _parse_origins(raw: str) -> list[str]:
@@ -24,10 +26,11 @@ def _parse_origins(raw: str) -> list[str]:
     return [o.strip() for o in raw.split(",") if o.strip()]
 
 
-def create_app(store: TaskStore, vision_llm=None) -> FastAPI:
-    global _store, _vision_llm
+def create_app(store: TaskStore, vision_llm=None, scheduler: Optional[Scheduler] = None) -> FastAPI:
+    global _store, _vision_llm, _scheduler
     _store = store
     _vision_llm = vision_llm
+    _scheduler = scheduler
 
     app = FastAPI(
         title="AccessAgent API",
@@ -219,5 +222,123 @@ def create_app(store: TaskStore, vision_llm=None) -> FastAPI:
                 os.unlink(tmp.name)
             except OSError as e:
                 print(f"[/test/vision-raw] 临时文件清理失败：{tmp.name}（{e}）")
+
+    # ── 定时任务（Schedule）路由 ─────────────────────────────────────
+
+    class ScheduleCreateRequest(BaseModel):
+        name: str = Field(..., description="人类可读的名字，如「工作日早上打卡」")
+        task: str = Field(..., description="要执行的任务描述，同 /task 接口的 task 字段")
+        cron: str = Field(...,
+                          description="标准 5 字段 cron 表达式，如 '0 9 * * 1-5' = 周一到周五 9:00",
+                          examples=["0 9 * * 1-5", "30 18 * * 1-5", "0 9 1 * *"])
+        max_steps: Optional[int] = Field(None, description="该任务的最大步数，覆盖全局默认")
+        skip_holidays: bool = Field(False, description="是否跳过法定节假日")
+        include_makeup_workdays: bool = Field(True, description="调休补班日是否仍执行")
+        retry_max_attempts: int = Field(3, ge=1, le=10)
+        retry_interval_seconds: int = Field(300, ge=0, le=3600)
+        enabled: bool = Field(True)
+
+    class ScheduleUpdateRequest(BaseModel):
+        name: Optional[str] = None
+        task: Optional[str] = None
+        cron: Optional[str] = None
+        max_steps: Optional[int] = None
+        skip_holidays: Optional[bool] = None
+        include_makeup_workdays: Optional[bool] = None
+        retry_max_attempts: Optional[int] = Field(None, ge=1, le=10)
+        retry_interval_seconds: Optional[int] = Field(None, ge=0, le=3600)
+        enabled: Optional[bool] = None
+
+    class ScheduleResponse(BaseModel):
+        id: str
+        name: str
+        task: str
+        cron: str
+        max_steps: Optional[int] = None
+        skip_holidays: bool
+        include_makeup_workdays: bool
+        retry_max_attempts: int
+        retry_interval_seconds: int
+        enabled: bool
+        created_at: str
+        updated_at: str
+        last_run_at: Optional[str] = None
+        last_task_id: Optional[str] = None
+        last_status: Optional[str] = None
+        run_count: int
+        next_run_at: Optional[str] = None   # 由 scheduler 计算，不在 store 中
+
+    def _to_schedule_resp(rec: dict) -> ScheduleResponse:
+        # 计算下次触发时间
+        next_run = _scheduler.get_next_run(rec["id"]) if _scheduler else None
+        data = dict(rec)
+        data["next_run_at"] = next_run
+        return ScheduleResponse(**data)
+
+    def _require_scheduler():
+        if _scheduler is None:
+            raise HTTPException(status_code=503, detail="调度器未启用")
+
+    @app.post("/schedule", response_model=ScheduleResponse, summary="创建定时任务",
+              dependencies=[Depends(require_api_token)])
+    def create_schedule(req: ScheduleCreateRequest):
+        """
+        创建一个定时任务。
+        cron 表达式示例：
+        - `0 9 * * 1-5`     工作日（周一到周五）9:00
+        - `30 18 * * 1-5`   工作日 18:30
+        - `0 9,18 * * 1-5`  工作日 9:00 和 18:00 各一次
+
+        建议为打卡任务配置：
+        - `skip_holidays=true` 跳过法定节假日
+        - `include_makeup_workdays=true` 调休补班日仍打卡（默认）
+        """
+        _require_scheduler()
+        try:
+            rec = _scheduler.add_schedule(req.model_dump())
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return _to_schedule_resp(rec)
+
+    @app.get("/schedules", response_model=list[ScheduleResponse], summary="列出所有定时任务")
+    def list_schedules():
+        _require_scheduler()
+        return [_to_schedule_resp(r) for r in _scheduler.schedule_store.list()]
+
+    @app.get("/schedule/{schedule_id}", response_model=ScheduleResponse, summary="查询定时任务")
+    def get_schedule(schedule_id: str):
+        _require_scheduler()
+        rec = _scheduler.schedule_store.get(schedule_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail=f"schedule {schedule_id} 不存在")
+        return _to_schedule_resp(rec)
+
+    @app.put("/schedule/{schedule_id}", response_model=ScheduleResponse, summary="更新定时任务",
+             dependencies=[Depends(require_api_token)])
+    def update_schedule(schedule_id: str, req: ScheduleUpdateRequest):
+        """
+        更新定时任务字段（只更新非 None 的字段）。
+        典型用途：临时禁用 `{"enabled": false}` / 修改 cron / 调整重试策略。
+        """
+        _require_scheduler()
+        updates = {k: v for k, v in req.model_dump().items() if v is not None}
+        if not updates:
+            raise HTTPException(status_code=400, detail="未提供任何要更新的字段")
+        try:
+            rec = _scheduler.update_schedule(schedule_id, **updates)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if rec is None:
+            raise HTTPException(status_code=404, detail=f"schedule {schedule_id} 不存在")
+        return _to_schedule_resp(rec)
+
+    @app.delete("/schedule/{schedule_id}", summary="删除定时任务",
+                dependencies=[Depends(require_api_token)])
+    def delete_schedule(schedule_id: str):
+        _require_scheduler()
+        ok = _scheduler.delete_schedule(schedule_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"schedule {schedule_id} 不存在")
+        return {"message": f"schedule {schedule_id} 已删除"}
 
     return app

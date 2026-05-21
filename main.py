@@ -5,6 +5,8 @@ import uvicorn
 from config import config
 from core.task_store import TaskStore
 from core.server import AccessAgentServer
+from core.schedule_store import ScheduleStore
+from core.scheduler import Scheduler
 from api.app import create_app
 
 
@@ -15,8 +17,12 @@ async def main():
     # WebSocket 服务（端口 8765）— 先创建，以便共享 vision_llm
     ws_server = AccessAgentServer(store)
 
+    # 定时任务调度器（共用主事件循环）
+    schedule_store = ScheduleStore()
+    scheduler = Scheduler(store, schedule_store, timezone=config.SCHEDULER_TIMEZONE)
+
     # FastAPI HTTP 服务（端口 8000）
-    app = create_app(store, vision_llm=ws_server.vision_llm)
+    app = create_app(store, vision_llm=ws_server.vision_llm, scheduler=scheduler)
     http_config = uvicorn.Config(
         app,
         host="0.0.0.0",
@@ -30,16 +36,21 @@ async def main():
     print(f"   HTTP API : http://0.0.0.0:8000")
     print(f"   API 文档 : http://0.0.0.0:8000/docs")
     print(f"   WebSocket: ws://0.0.0.0:{config.PORT}")
+    print(f"   时区     : {config.SCHEDULER_TIMEZONE}")
     print("=" * 50)
     print("提交任务示例：")
     print('  curl -X POST http://localhost:8000/task \\')
     print('       -H "Content-Type: application/json" \\')
     print('       -d \'{"task": "搜索NBA季后赛赛程并汇报给我"}\'')
-    print("  （可选）自定义最大步数：")
-    print('  curl -X POST http://localhost:8000/task \\')
+    print("创建工作日打卡定时任务示例：")
+    print('  curl -X POST http://localhost:8000/schedule \\')
     print('       -H "Content-Type: application/json" \\')
-    print('       -d \'{"task": "去TG转发图片", "max_steps": 80}\'')
+    print('       -d \'{"name":"早上打卡","task":"打开Lark点击Clock In打卡",'
+          '"cron":"0 9 * * 1-5","skip_holidays":true}\'')
     print("=" * 50)
+
+    # 启动调度器（在 uvicorn / ws_server 之前，确保已加载的 job 立即就绪）
+    scheduler.start()
 
     # ── 优雅退出：SIGINT / SIGTERM 先让 uvicorn 正常停止 ──────────
     loop = asyncio.get_running_loop()
@@ -56,11 +67,15 @@ async def main():
             pass
 
     # 同时运行两个服务；uvicorn 退出后 gather 取消 ws_server
-    await asyncio.gather(
-        ws_server.start("0.0.0.0", config.PORT),
-        http_server.serve(),
-        return_exceptions=True,
-    )
+    try:
+        await asyncio.gather(
+            ws_server.start("0.0.0.0", config.PORT),
+            http_server.serve(),
+            return_exceptions=True,
+        )
+    finally:
+        # 优雅关闭调度器：触发中的任务会跑完，新任务不再排程
+        scheduler.shutdown()
     print("[AccessAgent] 已退出")
 
 
