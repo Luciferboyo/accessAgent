@@ -26,15 +26,24 @@ class ExperiencePool:
     # ── 持久化 ──────────────────────────────────────────────────────────
 
     def _load(self) -> list[dict]:
+        defaults = _default_experiences()
         if os.path.exists(self.pool_path):
             try:
                 with open(self.pool_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    existing = json.load(f)
+                # 自动合并：将默认经验中 ID 不存在于文件中的条目追加进去
+                existing_ids = {e.get("id") for e in existing}
+                new_entries = [d for d in defaults if d.get("id") not in existing_ids]
+                if new_entries:
+                    merged = existing + new_entries
+                    self._save(merged)
+                    print(f"[ExperiencePool] 自动合并 {len(new_entries)} 条新经验：{[e['id'] for e in new_entries]}")
+                    return merged
+                return existing
             except (json.JSONDecodeError, OSError) as e:
                 print(f"[ExperiencePool] 读取失败（{e}），使用内置默认经验")
-        data = _default_experiences()
-        self._save(data)
-        return data
+        self._save(defaults)
+        return defaults
 
     def _save(self, data: list[dict] = None) -> None:
         if data is None:
@@ -191,5 +200,100 @@ def _default_experiences() -> list[dict]:
   · 图片查看器已打开，但尚未点击 Forward → progress，next_hint 提示点击 Forward 按钮
   · 图片查看器已打开并点击了 Forward，进入联系人选择界面 → done
 → 【严禁】因"界面从聊天变成了图片查看器"就判为 stuck——这是 tap 图片的必然结果"""
+        },
+        {
+            "id": "tg_username_vs_display_name",
+            "tags": [
+                "telegram", "tg", "username", "用户名", "display name", "显示名",
+                "title", "标题", "verify", "验证", "mismatch", "不匹配", "back", "返回",
+                "search", "搜索", "@", "联系人", "contact"
+            ],
+            "title": "TG的@username与显示名是不同字段，搜索结果不要因显示名不同而拒绝",
+            "rule": """Telegram 联系人有两个独立字段：
+  - 显示名（Display Name）：用户自定义的昵称，如 "GLO008"、"Benny Lee"
+  - 用户名（Username）：@开头的唯一ID，如 "@bgyy008"
+
+【重要】：这两个字段完全可以不同，任务中的名字可能指其中任意一个。
+
+当任务描述的是 @username（如"转发给 @bgyy008"）：
+→ 在搜索框输入 @bgyy008 → TG 返回的搜索结果就是该联系人
+→ 进入聊天后，标题栏显示的是【显示名】（如 GLO008），不是 @bgyy008
+→ 显示名 ≠ @username 完全正常，不是错误，不应该 back
+
+【验证 @username 的正确方式】（仅在怀疑时）：
+→ tap 聊天标题栏 → 进入联系人资料页 → 查看资料页中的 "@xxx" 用户名字段
+→ 若资料页 @username 与任务吻合 → 正确联系人，back 返回聊天继续任务
+
+【绝对禁止】：
+✗ 用显示名（GLO008）与任务描述的 @username（@bgyy008）直接比较，因"不一样"就 back
+✗ 一旦发现"标题不完全等于任务名字"就立刻 back，这会导致正确联系人被反复拒绝"""
+        },
+        {
+            "id": "tg_search_username_at_prefix",
+            "tags": [
+                "telegram", "tg", "search", "搜索", "username", "用户名",
+                "找", "find", "contact", "联系人", "@", "bgyy", "gl008"
+            ],
+            "title": "TG搜索联系人必须带@前缀，否则本地聊天列表搜不到",
+            "rule": """在 Telegram 搜索框中查找联系人时，必须使用 @ 前缀输入完整用户名：
+
+【正确做法】：输入 @bgyy008 → 精确命中该用户名
+【错误做法】：输入 bgyy008 → 仅搜索本地聊天历史，可能返回 No results
+【错误做法】：输入 GL008 → 按显示名搜索，会命中大量相似名称（GLO008、GL002 等）
+
+【强制规则】：
+① type 操作的 text 字段必须以 @ 开头，如 "@bgyy008"
+② 输入前确认搜索框已清空（若框内有内容先点击 Clear 按钮再输入）
+③ 搜索框内只允许有一个关键词，不要追加内容到已有文字后面
+④ 若 @username 搜索仍无结果，说明该用户从未与当前账号聊过天，需要通过"New Message"功能全局搜索"""
+        },
+        {
+            "id": "tg_chat_title_verify",
+            "tags": [
+                "telegram", "tg", "chat", "聊天", "enter", "进入", "contact", "联系人",
+                "username", "用户名", "forward", "转发", "title", "标题"
+            ],
+            "title": "进入TG聊天后验证标题栏——区分「@username搜索」与「列表滚动」两种入口",
+            "rule": """进入 TG 聊天后如何验证是否进入了正确的聊天，取决于【如何找到这个联系人】：
+
+━━ 情况A：通过搜索 @username 进入（最常见） ━━
+→ 搜索框输入 @bgyy008 → TG 全局搜索直接返回该用户 → 点击结果进入聊天
+→ 【此时标题栏显示的是"显示名"（如 GLO008、Benny 等），而非 @username】
+→ 显示名与任务中的 @username 不同是完全正常的，两者是同一个人的不同称呼
+→ 【强制规则】：通过 @username 搜索进入的聊天，直接信任，不要因显示名不同而 back
+→ 若需确认，tap 标题栏进入联系人资料页，查看资料页上的 @username 字段是否吻合
+
+━━ 情况B：从聊天列表滚动查找后进入 ━━
+→ 列表中可能有 GL002/GL005/GL008 等相似名称，视觉模型容易选错
+→ 进入后截图确认标题栏显示的名称是否与任务目标一致
+→ 不匹配 → 立即 back，重新仔细选择正确的联系人
+
+━━ 判断自己属于哪种情况 ━━
+→ 上一步执行了 type "@xxx" + 搜索框输入 → 情况A，信任结果，继续任务
+→ 上一步是在聊天列表滚动后点击 → 情况B，验证标题栏
+
+【反模式（禁止）】：
+✗ 通过 @username 搜索进入聊天后，因标题显示名与任务描述的名字不完全相同就 back
+✗ 反复 back → 重搜 → 进入同一个联系人 → 又 back，造成无限循环"""
+        },
+        {
+            "id": "tg_scroll_safe_zone",
+            "tags": [
+                "telegram", "tg", "chat", "聊天", "scroll", "滚动", "图片", "image",
+                "photo", "消息", "message", "查找", "find"
+            ],
+            "title": "TG聊天内scroll必须在屏幕中部执行，顶部滑动会跳转到联系人资料页",
+            "rule": """在 TG 聊天界面查找消息/图片时，scroll 操作有严格区域限制：
+
+【危险区域（禁止 scroll）】：y < 屏幕高度 15%（以 2340px 屏幕为例，约 y < 350）
+  → 这是聊天标题栏/联系人头像区域，在此处滑动会触发"进入联系人资料页"导航
+
+【安全区域（推荐 scroll）】：y 在屏幕高度 30%-80% 之间（约 700-1870px）
+  → 这是聊天消息列表区域，滑动才能真正滚动消息
+
+【强制规则】：
+① 选择用于 scroll 的元素时，只选 y 坐标在屏幕中部的元素（聊天消息列表）
+② 若无中部可 scroll 元素，改用 tap(x, y_mid) 在消息区中部位置直接滑动（y_mid ≈ 屏幕高度 50%）
+③ 绝对不要用 index 对应 y < 350 的元素执行 scroll"""
         },
     ]

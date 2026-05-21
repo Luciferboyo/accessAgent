@@ -247,6 +247,7 @@ class AccessAgentServer:
         stuck_action_counts: dict[str, int] = {}  # 记录每个 (action:index) 累计卡住次数
         last_tap_coords: tuple[int, int] | None = None   # 上一次 tap 的手机坐标
         consecutive_same_tap = 0                         # 连续在相同位置 tap 的次数
+        profile_page_consecutive = 0                     # 连续进入联系人资料页的次数（死循环检测）
 
         try:
             # 任务开始时分类一次，后续复用，不重复调用 LLM
@@ -599,68 +600,76 @@ class AccessAgentServer:
                     break
 
                 # ── 6. 执行动作 ──────────────────────────────────
-                cmd = self._build_command(action, ui_elements,
-                                          current_state.get("screen_size"))
-                if cmd is None:
-                    # index 越界或元素 bounds 无效（不可见），跳过指令直接重试
-                    print("[警告] 元素不存在或不可见，跳过本次指令，重新获取界面状态")
-                    # 元素极少（≤3）说明被困在弹窗/单按钮页面，Vision 在幻觉不存在的关闭按钮
-                    # 自动执行 back() 兜底脱困，避免死在弹窗里
-                    if len(ui_elements) <= 3:
-                        print("[兜底] 当前仅有极少元素，自动执行 back() 尝试脱困")
-                        await websocket.send(json.dumps({"type": "back"}))
-                        await websocket.recv()  # 消费执行结果
-                    consecutive_failures += 1
-                    total_failures += 1
-                    failure_reason = (
-                        f"AI 指定的元素编号不存在或该元素不可见（零尺寸）。"
-                        f"当前共 {len(ui_elements)} 个元素，请只选择截图或文字描述中实际可见的元素编号。"
-                        + ("已自动执行 back() 尝试退出当前页面。" if len(ui_elements) <= 3 else "")
-                    )
-                    current_state = await self._request_state(websocket)
-                    continue
+                # step_done：Vision 确认当前子步骤已完成，跳过指令执行直接推进
+                _step_done_by_vision = action.get("action") == "step_done"
 
-                print(f"[执行] 发送指令：{cmd}")
-                await websocket.send(json.dumps(cmd))
-                action_log.append(action)
-
-                result_raw = await websocket.recv()
-                try:
-                    result = json.loads(result_raw)
-                except json.JSONDecodeError:
-                    print(f"[警告] 动作执行响应解析失败，原始内容：{str(result_raw)[:100]}")
-                    result = {"status": "unknown"}
-
-                # ── find_package 特殊处理：注入查询结果，重新让 Executor 决策 ──
-                if action.get("action") == "find_package":
-                    packages = result.get("packages", [])
-                    keyword = action.get("params", {}).get("keyword", "")
-                    if packages:
-                        pkg_str = "、".join(packages)
-                        failure_reason = (
-                            f"find_package 已查到设备上与 '{keyword}' 匹配的包名：{pkg_str}。"
-                            f"请直接使用正确的包名调用 open_app。"
-                        )
-                        history.append(
-                            f"步骤{step_index + 1}：find_package({keyword}) → {pkg_str}"
-                        )
-                        print(f"[find_package] 找到包名：{pkg_str}")
-                        consecutive_failures = 0  # 包名查询成功，不算失败
-                    else:
-                        failure_reason = (
-                            f"find_package 未找到关键词 '{keyword}' 对应的已安装应用，"
-                            f"请确认应用是否已安装，或尝试换一个更短的关键词重新查询。"
-                        )
-                        history.append(
-                            f"步骤{step_index + 1}：find_package({keyword}) → 未找到匹配包名"
-                        )
-                        print(f"[find_package] 未找到匹配包名")
+                if not _step_done_by_vision:
+                    cmd = self._build_command(action, ui_elements,
+                                              current_state.get("screen_size"))
+                    if cmd is None:
+                        # index 越界或元素 bounds 无效（不可见），跳过指令直接重试
+                        print("[警告] 元素不存在或不可见，跳过本次指令，重新获取界面状态")
+                        # 元素极少（≤3）说明被困在弹窗/单按钮页面，Vision 在幻觉不存在的关闭按钮
+                        # 自动执行 back() 兜底脱困，避免死在弹窗里
+                        if len(ui_elements) <= 3:
+                            print("[兜底] 当前仅有极少元素，自动执行 back() 尝试脱困")
+                            await websocket.send(json.dumps({"type": "back"}))
+                            await websocket.recv()  # 消费执行结果
                         consecutive_failures += 1
                         total_failures += 1
-                    current_state = await self._request_state(websocket)
-                    continue  # 不走 Reflector，直接让 Executor 用包名信息重新决策
+                        failure_reason = (
+                            f"AI 指定的元素编号不存在或该元素不可见（零尺寸）。"
+                            f"当前共 {len(ui_elements)} 个元素，请只选择截图或文字描述中实际可见的元素编号。"
+                            + ("已自动执行 back() 尝试退出当前页面。" if len(ui_elements) <= 3 else "")
+                        )
+                        current_state = await self._request_state(websocket)
+                        continue
 
-                print(f"[App] 执行状态：{result.get('status')}")
+                    print(f"[执行] 发送指令：{cmd}")
+                    await websocket.send(json.dumps(cmd))
+                    action_log.append(action)
+
+                    result_raw = await websocket.recv()
+                    try:
+                        result = json.loads(result_raw)
+                    except json.JSONDecodeError:
+                        print(f"[警告] 动作执行响应解析失败，原始内容：{str(result_raw)[:100]}")
+                        result = {"status": "unknown"}
+
+                    # ── find_package 特殊处理：注入查询结果，重新让 Executor 决策 ──
+                    if action.get("action") == "find_package":
+                        packages = result.get("packages", [])
+                        keyword = action.get("params", {}).get("keyword", "")
+                        if packages:
+                            pkg_str = "、".join(packages)
+                            failure_reason = (
+                                f"find_package 已查到设备上与 '{keyword}' 匹配的包名：{pkg_str}。"
+                                f"请直接使用正确的包名调用 open_app。"
+                            )
+                            history.append(
+                                f"步骤{step_index + 1}：find_package({keyword}) → {pkg_str}"
+                            )
+                            print(f"[find_package] 找到包名：{pkg_str}")
+                            consecutive_failures = 0  # 包名查询成功，不算失败
+                        else:
+                            failure_reason = (
+                                f"find_package 未找到关键词 '{keyword}' 对应的已安装应用，"
+                                f"请确认应用是否已安装，或尝试换一个更短的关键词重新查询。"
+                            )
+                            history.append(
+                                f"步骤{step_index + 1}：find_package({keyword}) → 未找到匹配包名"
+                            )
+                            print(f"[find_package] 未找到匹配包名")
+                            consecutive_failures += 1
+                            total_failures += 1
+                        current_state = await self._request_state(websocket)
+                        continue  # 不走 Reflector，直接让 Executor 用包名信息重新决策
+
+                    print(f"[App] 执行状态：{result.get('status')}")
+                else:
+                    # step_done 不发送指令，仅记录到日志
+                    action_log.append(action)
+                    print(f"[step_done] Vision 确认子步骤已完成，跳过指令执行，直接推进")
 
                 # ── 7. 获取新状态（复用为下一步）────────────────
                 ui_text_before = ui_text
@@ -674,7 +683,16 @@ class AccessAgentServer:
                 # 必然误报失败——跳过 Reflector，由下一步的截图/状态判断是否成功
                 SKIP_REFLECT = {"back", "home", "search_web", "tap"}
                 act_name = action.get("action")
-                if act_name == "open_app":
+                if _step_done_by_vision:
+                    # Vision 已通过截图确认当前子步骤完成，无需 Reflector 判断
+                    verify = {
+                        "status": "done",
+                        "reason": f"Vision 确认子步骤已完成：{action.get('reason', '')[:100]}",
+                        "next_hint": ""
+                    }
+                    reflect_usage = TokenUsage()
+                    print(f"[step_done] {verify['reason']}")
+                elif act_name == "open_app":
                     # open_app 用包名验证：确认前台应用确实切换为目标应用
                     target_pkg = action.get("params", {}).get("package", "")
                     actual_pkg = current_state.get("package", "")
@@ -794,6 +812,30 @@ class AccessAgentServer:
                 else:
                     consecutive_scroll_no_change = 0
 
+                # ── 联系人资料页循环检测 ───────────────────────────────────────
+                # 连续多次操作后界面仍停留在联系人资料页，说明 scroll 顶部区域
+                # 触发了"进入联系人资料页"导航，形成死循环。
+                if self._is_contact_profile_page(ui_text_after):
+                    profile_page_consecutive += 1
+                    if profile_page_consecutive >= 2:
+                        reflect_status = "stuck"
+                        verify["status"] = "stuck"
+                        verify["reason"] = (
+                            f"连续 {profile_page_consecutive} 次操作后界面仍在联系人资料页，"
+                            "陷入「资料页→聊天→资料页」死循环"
+                        )
+                        verify["next_hint"] = (
+                            "【根本原因】在聊天界面对顶部区域元素（y<屏幕高度15%）执行了 scroll，"
+                            "TG 把顶部滑动解释为导航至联系人资料页。"
+                            "【立即改用以下策略】：截图后在屏幕中部（y约为屏幕高度40%-70%，"
+                            "即约900-1640px）找到聊天消息列表区域执行 scroll；"
+                            "或直接 tap(x,y) 精准点击图片缩略图坐标，不再依赖 scroll 查找图片。"
+                        )
+                        print(f"[资料页检测] 连续 {profile_page_consecutive} 次进入联系人资料页，"
+                              f"强制转 stuck")
+                else:
+                    profile_page_consecutive = 0
+
                 status_label = {
                     "done": "完成", "progress": "进行中", "stuck": "失败"
                 }.get(reflect_status, "失败")
@@ -903,6 +945,7 @@ class AccessAgentServer:
                         consecutive_same_tap = 0   # 重规划重置 tap 计数
                         last_tap_coords = None
                         stuck_action_counts.clear()  # 新计划重置卡死计数
+                        profile_page_consecutive = 0
 
         except websockets.ConnectionClosed:
             print(f"[WS] 连接断开，任务 [{task_id}] 中止")
@@ -941,6 +984,16 @@ class AccessAgentServer:
                                       error=f"已达最大步数 {max_steps} 步，完成 {step_index}/{len(plan) if plan else '?'} 步",
                                       completed_at=datetime.now().isoformat(),
                                       usage=usage_dict)
+
+    def _is_contact_profile_page(self, ui_text: str) -> bool:
+        """
+        判断当前界面是否为联系人资料页（TG/WhatsApp 等 IM 应用）。
+        通过资料页特有的按钮组合（Profile photo + Mute + Call/Video）来识别。
+        """
+        text_lower = ui_text.lower()
+        indicators = ["profile photo", "mute", "call", "video"]
+        hits = sum(1 for kw in indicators if kw in text_lower)
+        return hits >= 3
 
     async def _validate_report(self, task: str, content: str) -> tuple[bool, str, TokenUsage]:
         """
@@ -1192,12 +1245,17 @@ Agent 准备汇报的内容：
 
         def safe_y(y: int, label: str = "") -> int:
             """
-            若 y 坐标落在屏幕底部 8% 安全区以内（可能与导航条/手势区重叠），
+            若 y 坐标落在屏幕底部 5% 安全区以内（可能与导航条/手势区重叠），
             自动上移至安全区上沿 - 20px。
             典型场景：TG "Share in 1 chat" 按钮 bounds 被无障碍树报告到导航区内。
+
+            注意：阈值设为 95%（而非更保守的 92%），原因：
+            - 现代 Android 导航条/手势区约占屏幕底部 3-4%（2340px 屏幕约 y>2270）
+            - TG 发送按钮（纸飞机）通常在 y≈2160，92% 阈值（y>2152）会误截该按钮
+            - 95% 阈值（y>2223）保留导航条保护的同时，允许底部输入区控件正常点击
             """
             if screen_size and screen_size[1] > 0:
-                threshold = int(screen_size[1] * 0.92)
+                threshold = int(screen_size[1] * 0.95)
                 if y > threshold:
                     adjusted = threshold - 20
                     print(f"[坐标安全]{' ' + label if label else ''} "
@@ -1227,6 +1285,16 @@ Agent 准备汇报的内容：
                 return None
             x, y = self.analyzer.get_center(elem)
             y = safe_y(y, "scroll")
+            # scroll 起点不能在屏幕顶部 15% 区域：TG 等 IM 应用中，
+            # 对顶部（标题栏/联系人头像区）滑动会触发"进入联系人资料页"导航，
+            # 而不是滚动消息列表。
+            if screen_size and screen_size[1] > 0:
+                top_threshold = int(screen_size[1] * 0.15)
+                if y < top_threshold:
+                    adjusted_y = top_threshold + 50
+                    print(f"[坐标安全] scroll y={y} 位于顶部危险区（<{top_threshold}），"
+                          f"自动下移至 y={adjusted_y}")
+                    y = adjusted_y
             return {"type": "scroll", "x": x, "y": y,
                     "direction": params.get("direction", "up")}
 

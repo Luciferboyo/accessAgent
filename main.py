@@ -12,8 +12,11 @@ async def main():
     # 共享任务队列
     store = TaskStore()
 
+    # WebSocket 服务（端口 8765）— 先创建，以便共享 vision_llm
+    ws_server = AccessAgentServer(store)
+
     # FastAPI HTTP 服务（端口 8000）
-    app = create_app(store)
+    app = create_app(store, vision_llm=ws_server.vision_llm)
     http_config = uvicorn.Config(
         app,
         host="0.0.0.0",
@@ -21,9 +24,6 @@ async def main():
         log_level="warning",   # 减少 uvicorn 日志噪音
     )
     http_server = uvicorn.Server(http_config)
-
-    # WebSocket 服务（端口 8765）
-    ws_server = AccessAgentServer(store)
 
     print("=" * 50)
     print("🚀 AccessAgent 启动")

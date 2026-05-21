@@ -1,17 +1,22 @@
-from fastapi import FastAPI, HTTPException
+import os
+import tempfile
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 
 from core.task_store import TaskStore, TaskRecord
 
-# 全局 store，由 main.py 注入
+# 全局 store / vision_llm，由 main.py 注入
 _store: Optional[TaskStore] = None
+_vision_llm = None
 
 
-def create_app(store: TaskStore) -> FastAPI:
-    global _store
+def create_app(store: TaskStore, vision_llm=None) -> FastAPI:
+    global _store, _vision_llm
     _store = store
+    _vision_llm = vision_llm
 
     app = FastAPI(
         title="AccessAgent API",
@@ -119,5 +124,70 @@ def create_app(store: TaskStore) -> FastAPI:
             "running": running,
             "total_tasks": len(_store.tasks),
         }
+
+    # ── 测试接口：直接上传图片文件 → VisionLLM ───────────────────────
+
+    class VisionTestResponse(BaseModel):
+        image_size_bytes: int
+        image_size_kb: float
+        image_size_mb: float
+        llm_response: Optional[str] = None
+        error: Optional[str] = None
+
+    @app.post("/test/vision-raw", response_model=VisionTestResponse,
+              summary="测试：上传截图文件发送给 VisionLLM")
+    async def test_vision_raw(
+        file: UploadFile = File(..., description="截图文件（jpg/png/webp）"),
+        prompt: str = Form("请描述这张图片的内容。"),
+    ):
+        """
+        直接上传图片文件（不做任何压缩/缩放）发给视觉模型，
+        返回图片容量和 LLM 响应，用于测试 API 能否接受大图（如 3 MB）。
+
+        **使用方法（curl）**：
+        ```
+        curl -X POST http://localhost:8000/test/vision-raw \\
+             -F "file=@/path/to/screenshot.jpg" \\
+             -F "prompt=请描述这张图片"
+        ```
+        """
+        if _vision_llm is None:
+            raise HTTPException(status_code=503, detail="VisionLLM 未初始化，请检查服务启动配置")
+
+        raw_bytes = await file.read()
+        size_bytes = len(raw_bytes)
+        size_kb = round(size_bytes / 1024, 2)
+        size_mb = round(size_bytes / 1024 / 1024, 3)
+
+        # 根据文件头推断扩展名，优先用上传文件名
+        suffix = os.path.splitext(file.filename or "")[-1].lower() or ".jpg"
+        if suffix not in (".jpg", ".jpeg", ".png", ".webp"):
+            suffix = ".jpg"
+
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        try:
+            tmp.write(raw_bytes)
+            tmp.flush()
+            tmp.close()
+
+            llm_resp, _usage = _vision_llm.predict(prompt, tmp.name)
+            return VisionTestResponse(
+                image_size_bytes=size_bytes,
+                image_size_kb=size_kb,
+                image_size_mb=size_mb,
+                llm_response=llm_resp,
+            )
+        except Exception as e:
+            return VisionTestResponse(
+                image_size_bytes=size_bytes,
+                image_size_kb=size_kb,
+                image_size_mb=size_mb,
+                error=str(e),
+            )
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
 
     return app
