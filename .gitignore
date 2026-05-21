@@ -20,8 +20,17 @@ screenshots/
 mock_screenshots/
 reports/
 
-# 任务记忆（本地数据）
+# 任务记忆（本地运行时数据）
 memory/task_flows.json
+memory/step_fragments.json
+
+# Node / npm（项目为纯 Python，不应提交）
+node_modules/
+package.json
+package-lock.json
+
+# Claude Code 本地工作区
+.claude/
 
 # IDE
 .idea/
