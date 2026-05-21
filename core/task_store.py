@@ -29,6 +29,8 @@ class TaskRecord:
     total_steps: Optional[int] = None
     # 用户自定义最大步数（None 时使用 config.MAX_STEPS 全局默认值）
     max_steps: Optional[int] = None
+    # 取消标志：由 /task/{id}/cancel 设置，主循环每轮开始检查
+    cancel_requested: bool = False
 
 
 # 允许通过 update(**kwargs) 写入的字段白名单，避免拼写错误静默写入非法属性
@@ -87,6 +89,26 @@ class TaskStore:
             del self.tasks[task_id]
             return True
         return False
+
+    def request_cancel(self, task_id: str) -> bool:
+        """
+        请求取消任务。
+        - pending：直接标记为 failed（不会被执行）
+        - running：设置 cancel_requested，server 主循环下一轮检测后退出
+        - completed/failed：返回 False（无法取消已结束的）
+        """
+        record = self.tasks.get(task_id)
+        if record is None:
+            return False
+        if record.status in (TaskStatus.COMPLETED, TaskStatus.FAILED,
+                             "completed", "failed"):
+            return False
+        record.cancel_requested = True
+        if record.status in (TaskStatus.PENDING, "pending"):
+            record.status = TaskStatus.FAILED
+            record.error = "已被用户取消"
+            record.completed_at = datetime.now().isoformat()
+        return True
 
     async def requeue(self, task_id: str) -> bool:
         """

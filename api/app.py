@@ -129,6 +129,32 @@ def create_app(store: TaskStore, vision_llm=None, scheduler: Optional[Scheduler]
         """返回所有任务列表（按创建时间倒序）。"""
         return [to_resp(r) for r in _store.list_all()]
 
+    @app.get("/tasks/running", response_model=list[TaskResponse],
+             summary="列出当前正在执行的任务")
+    def list_running_tasks():
+        """返回所有处于 running 状态的任务，含实时进度。"""
+        return [
+            to_resp(r) for r in _store.snapshot()
+            if r.status in (TaskStatus.RUNNING, "running")
+        ]
+
+    @app.post("/task/{task_id}/cancel", summary="取消任务",
+              dependencies=[Depends(require_api_token)])
+    def cancel_task(task_id: str):
+        """
+        请求取消任务：
+        - pending：立即标记为 failed
+        - running：设置取消标志，主循环下一轮（通常 1-3 秒内）检测后中止
+        - 已完成/已失败的任务：返回 409
+        """
+        record = _store.get(task_id)
+        if not record:
+            raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
+        ok = _store.request_cancel(task_id)
+        if not ok:
+            raise HTTPException(status_code=409, detail="任务已结束，无法取消")
+        return {"message": f"已请求取消任务 {task_id}", "status": record.status}
+
     @app.delete("/task/{task_id}", summary="删除任务记录",
                 dependencies=[Depends(require_api_token)])
     def delete_task(task_id: str):
@@ -233,7 +259,15 @@ def create_app(store: TaskStore, vision_llm=None, scheduler: Optional[Scheduler]
                           examples=["0 9 * * 1-5", "30 18 * * 1-5", "0 9 1 * *"])
         max_steps: Optional[int] = Field(None, description="该任务的最大步数，覆盖全局默认")
         skip_holidays: bool = Field(False, description="是否跳过法定节假日")
-        include_makeup_workdays: bool = Field(True, description="调休补班日是否仍执行")
+        holiday_provider: str = Field(
+            "china_timor",
+            description="节假日数据源：'china_timor'(中国) | 'nager'(国际，需配 holiday_region)",
+        )
+        holiday_region: str = Field(
+            "",
+            description="ISO 国家码，仅 holiday_provider='nager' 时生效（US/JP/GB/DE/SG/MY 等）",
+        )
+        include_makeup_workdays: bool = Field(True, description="调休补班日是否仍执行（仅 china_timor 有效）")
         retry_max_attempts: int = Field(3, ge=1, le=10)
         retry_interval_seconds: int = Field(300, ge=0, le=3600)
         enabled: bool = Field(True)
@@ -244,6 +278,8 @@ def create_app(store: TaskStore, vision_llm=None, scheduler: Optional[Scheduler]
         cron: Optional[str] = None
         max_steps: Optional[int] = None
         skip_holidays: Optional[bool] = None
+        holiday_provider: Optional[str] = None
+        holiday_region: Optional[str] = None
         include_makeup_workdays: Optional[bool] = None
         retry_max_attempts: Optional[int] = Field(None, ge=1, le=10)
         retry_interval_seconds: Optional[int] = Field(None, ge=0, le=3600)
@@ -256,6 +292,8 @@ def create_app(store: TaskStore, vision_llm=None, scheduler: Optional[Scheduler]
         cron: str
         max_steps: Optional[int] = None
         skip_holidays: bool
+        holiday_provider: str
+        holiday_region: str
         include_makeup_workdays: bool
         retry_max_attempts: int
         retry_interval_seconds: int
@@ -340,5 +378,34 @@ def create_app(store: TaskStore, vision_llm=None, scheduler: Optional[Scheduler]
         if not ok:
             raise HTTPException(status_code=404, detail=f"schedule {schedule_id} 不存在")
         return {"message": f"schedule {schedule_id} 已删除"}
+
+    class TriggerRequest(BaseModel):
+        bypass_holiday_check: bool = Field(
+            True, description="为 true 时忽略节假日设置，立即执行（默认）；false 时仍按 schedule 配置校验"
+        )
+
+    @app.post("/schedule/{schedule_id}/trigger", summary="立即手动触发一次定时任务",
+              dependencies=[Depends(require_api_token)])
+    async def trigger_schedule(schedule_id: str, req: TriggerRequest = TriggerRequest()):
+        """
+        立即手动触发某 schedule 执行一次，常用于测试新建的 schedule 是否正常。
+        - 返回新创建的 task_id（可用 /task/{id} 查询进度）
+        - 不计入该 schedule 的 retry 循环
+        - 不影响该 schedule 的下次自动 cron 触发
+        """
+        _require_scheduler()
+        sched = _scheduler.schedule_store.get(schedule_id)
+        if sched is None:
+            raise HTTPException(status_code=404, detail=f"schedule {schedule_id} 不存在")
+        task_id = await _scheduler.trigger_now(
+            schedule_id, bypass_holiday_check=req.bypass_holiday_check
+        )
+        if task_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail="未触发：当前为节假日且未启用 bypass_holiday_check"
+            )
+        return {"task_id": task_id, "schedule_id": schedule_id,
+                "message": "已提交，可通过 GET /task/{task_id} 查询执行进度"}
 
     return app

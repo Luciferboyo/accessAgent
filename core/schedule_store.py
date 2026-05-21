@@ -10,14 +10,18 @@
   cron                     5 字段标准 cron 表达式（分 时 日 月 周）
   max_steps                可选，单次任务最大步数
   skip_holidays            true 时跳过法定节假日
-  include_makeup_workdays  true 时调休补班日仍执行（默认 true）
+  holiday_provider         节假日数据源：
+                             - "china_timor"（默认）中国大陆，timor.tech
+                             - "nager"            国际通用，date.nager.at，需配 holiday_region
+  holiday_region           ISO 国家码，仅 holiday_provider=nager 时生效（如 US/JP/GB）
+  include_makeup_workdays  true 时调休补班日仍执行（默认 true，仅 china_timor 有效）
   retry_max_attempts       任务失败时重试次数（含首次，默认 3）
   retry_interval_seconds   重试间隔（默认 300s）
   enabled                  是否启用
   created_at / updated_at  ISO 时间戳
   last_run_at              上次触发时间
   last_task_id             上次触发的 task_id（可拿去查 /task/{id}）
-  last_status              上次最终状态（completed/failed/skipped_holiday/skipped_makeup）
+  last_status              上次最终状态（completed/failed/skipped_*）
   run_count                历史触发总次数
 """
 
@@ -79,6 +83,8 @@ class ScheduleStore:
             "cron": data["cron"],
             "max_steps": data.get("max_steps"),
             "skip_holidays": bool(data.get("skip_holidays", False)),
+            "holiday_provider": data.get("holiday_provider", "china_timor"),
+            "holiday_region": data.get("holiday_region", ""),
             "include_makeup_workdays": bool(data.get("include_makeup_workdays", True)),
             "retry_max_attempts": int(data.get("retry_max_attempts", 3)),
             "retry_interval_seconds": int(data.get("retry_interval_seconds", 300)),
@@ -97,6 +103,7 @@ class ScheduleStore:
     # 允许通过 update() 写入的字段白名单（与 task_store 同思路）
     _UPDATABLE = frozenset({
         "name", "task", "cron", "max_steps", "skip_holidays",
+        "holiday_provider", "holiday_region",
         "include_makeup_workdays", "retry_max_attempts",
         "retry_interval_seconds", "enabled",
     })

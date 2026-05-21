@@ -322,6 +322,21 @@ class AccessAgentServer:
                 print(f"\n{'='*50}")
                 print(f"[Step {global_step + 1}] [{task_id}]")
 
+                # ── 0. 取消请求检测（用户调用 /task/{id}/cancel） ────
+                _rec = self.store.get(task_id)
+                if _rec and _rec.cancel_requested:
+                    print(f"[取消] 用户请求取消任务 [{task_id}]，中止执行")
+                    await websocket.send(json.dumps({
+                        "type": "finish",
+                        "message": "任务已被用户取消"
+                    }))
+                    self.store.update(task_id,
+                                      status=TaskStatus.FAILED,
+                                      error="已被用户取消",
+                                      completed_at=datetime.now().isoformat(),
+                                      usage=usage.to_dict())
+                    break
+
                 # ── 1. 使用当前状态 ──────────────────────────────
                 ui_elements = current_state.get("ui_elements", [])
                 ui_text = self.analyzer.parse_elements(ui_elements)

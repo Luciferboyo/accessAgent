@@ -149,11 +149,13 @@ class Scheduler:
             print(f"[Scheduler] 跳过 {schedule_id}：未找到或已禁用")
             return
 
-        # ── 节假日 / 调休 检查 ────────────────────────────────────
+        # ── 节假日 / 调休 检查（按 schedule 配置的 provider + region） ──
         if sched.get("skip_holidays"):
-            day_type = await get_day_type(date.today())
+            provider = sched.get("holiday_provider", "china_timor")
+            region = sched.get("holiday_region", "")
+            day_type = await get_day_type(date.today(), provider=provider, region=region)
             if day_type == "holiday":
-                print(f"[Scheduler] {schedule_id} 今天是法定节假日，跳过")
+                print(f"[Scheduler] {schedule_id} 今天是节假日（{provider}{':' + region if region else ''}），跳过")
                 self.schedule_store.mark_run(schedule_id, "", "skipped_holiday")
                 return
             if day_type == "makeup" and not sched.get("include_makeup_workdays", True):
@@ -161,7 +163,6 @@ class Scheduler:
                 self.schedule_store.mark_run(schedule_id, "", "skipped_makeup")
                 return
             if day_type == "weekend":
-                # cron 已表达周几，理论不会触发到周末；但若用户写了 * * * 仍兜底跳过
                 print(f"[Scheduler] {schedule_id} 今天是周末（skip_holidays=true 时一并跳过），跳过")
                 self.schedule_store.mark_run(schedule_id, "", "skipped_weekend")
                 return
@@ -195,6 +196,51 @@ class Scheduler:
         print(f"[Scheduler] {schedule_id} 已连续 {max_attempts} 次失败，放弃")
         self.schedule_store.mark_run(schedule_id, last_task_id, f"failed_after_{max_attempts}_attempts")
 
+    async def trigger_now(self, schedule_id: str,
+                          bypass_holiday_check: bool = True) -> Optional[str]:
+        """
+        立即手动触发一次某个 schedule，返回新创建的 task_id。
+        - bypass_holiday_check=True（默认）：忽略节假日设置直接执行，方便测试
+        - 不会经过 retry_max_attempts 循环；用户手动触发就执行一次
+        - 调度器自动安排的 cron 触发不受影响
+        """
+        sched = self.schedule_store.get(schedule_id)
+        if sched is None:
+            return None
+
+        # 选择性跳过节假日检查
+        if not bypass_holiday_check and sched.get("skip_holidays"):
+            day_type = await get_day_type(
+                date.today(),
+                provider=sched.get("holiday_provider", "china_timor"),
+                region=sched.get("holiday_region", ""),
+            )
+            if day_type in ("holiday", "weekend"):
+                print(f"[Scheduler] trigger_now {schedule_id} 命中 {day_type}，跳过")
+                return None
+            if day_type == "makeup" and not sched.get("include_makeup_workdays", True):
+                return None
+
+        record = await self.task_store.submit(
+            sched["task"], max_steps=sched.get("max_steps")
+        )
+        # 异步等待完成并 mark_run，不阻塞 trigger_now 返回
+        asyncio.create_task(self._track_manual_trigger(schedule_id, record.task_id))
+        print(f"[Scheduler] trigger_now {schedule_id} 已提交，task_id={record.task_id}")
+        return record.task_id
+
+    async def _track_manual_trigger(self, schedule_id: str, task_id: str) -> None:
+        """后台等待手动触发的任务完成并写入 mark_run，不计入 retry 循环。"""
+        status = await self._wait_completion(task_id)
+        self.schedule_store.mark_run(schedule_id, task_id, f"manual_{status}")
+
+    @staticmethod
+    def _status_str(status) -> str:
+        """统一拿到 'completed' / 'failed' 等小写字符串，无论 status 是 enum 还是字符串。"""
+        if hasattr(status, "value"):
+            return status.value
+        return str(status)
+
     async def _wait_completion(self, task_id: str,
                                timeout: int = DEFAULT_WAIT_TIMEOUT_SECONDS) -> str:
         """轮询 TaskStore 直到任务到终态或超时。"""
@@ -205,7 +251,7 @@ class Scheduler:
                 return "missing"
             if rec.status in (TaskStatus.COMPLETED, TaskStatus.FAILED,
                               "completed", "failed"):
-                return rec.status if isinstance(rec.status, str) else rec.status.value
+                return self._status_str(rec.status)
             await asyncio.sleep(WAIT_POLL_SECONDS)
             elapsed += WAIT_POLL_SECONDS
         return "timeout"
